@@ -2,15 +2,17 @@
 """
 Decision Maker Scraper CLI
 ==========================
-Trova CEO, CTO, CFO e altri exec nelle 100 aziende piu' fighe del momento.
+Trova CEO, CTO, CFO e altri exec nelle 100 aziende piu' fighe del momento,
+con email e profilo LinkedIn.
 
 Uso rapido:
     python main.py                          # scrapa tutte le 100 aziende
     python main.py --limit 10              # prime 10 aziende
     python main.py --sector AI             # solo aziende AI
-    python main.py --out results.csv       # salva in CSV
+    python main.py --out results.csv       # salva in CSV (apri con Excel)
     python main.py --out results.json      # salva in JSON
     python main.py --no-ddg --no-cb        # solo leadership page
+    python main.py --no-hunter             # senza Hunter.io API
 """
 
 import argparse
@@ -27,7 +29,8 @@ from rich.logging import RichHandler
 from rich import print as rprint
 
 from companies import TOP_100_COMPANIES
-from scraper import scrape_all, DecisionMaker
+from scraper import DecisionMaker, SmartSession, scrape_company
+from email_finder import enrich_with_emails
 
 console = Console()
 
@@ -65,6 +68,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--no-cb", action="store_true",
         help="Disabilita lo scraping di Crunchbase",
+    )
+    p.add_argument(
+        "--no-hunter", action="store_true",
+        help="Disabilita Hunter.io API (usa solo scraping + pattern)",
     )
     p.add_argument(
         "--verbose", "-v", action="store_true",
@@ -106,21 +113,23 @@ def print_results_table(results: list[DecisionMaker]) -> None:
         show_lines=True,
         expand=True,
     )
-    table.add_column("Nome", style="bold white", min_width=20)
-    table.add_column("Titolo", style="cyan", min_width=20)
-    table.add_column("Azienda", style="green", min_width=15)
-    table.add_column("Settore", style="magenta", width=12)
-    table.add_column("LinkedIn", style="blue", min_width=10)
-    table.add_column("Fonte", style="dim", width=18)
+    table.add_column("Nome", style="bold white", min_width=18)
+    table.add_column("Titolo", style="cyan", min_width=18)
+    table.add_column("Azienda", style="green", min_width=14)
+    table.add_column("Settore", style="magenta", width=11)
+    table.add_column("Email", style="yellow", min_width=26)
+    table.add_column("LinkedIn", style="blue", width=10)
+    table.add_column("Fonte", style="dim", width=16)
 
     for dm in results:
         li = (
             f"[link={dm.linkedin_url}]Profilo[/link]"
             if dm.linkedin_url else "[dim]n/a[/dim]"
         )
+        email_display = dm.email if dm.email else "[dim]n/a[/dim]"
         table.add_row(
             dm.name, dm.title, dm.company,
-            dm.sector, li, dm.source,
+            dm.sector, email_display, li, dm.source,
         )
 
     console.print(table)
@@ -128,8 +137,13 @@ def print_results_table(results: list[DecisionMaker]) -> None:
 
 def save_csv(results: list[DecisionMaker], path: str) -> None:
     df = pd.DataFrame([dm.to_dict() for dm in results])
+    # Riordina colonne per leggibilita'
+    cols = ["name", "title", "company", "sector", "email", "linkedin_url",
+            "domain", "source", "source_url"]
+    df = df[[c for c in cols if c in df.columns]]
     df.to_csv(path, index=False, encoding="utf-8")
     rprint(f"[green]CSV salvato in: {path}[/green]")
+    rprint(f"[dim]Aprilo con Excel o Google Sheets.[/dim]")
 
 
 def save_json(results: list[DecisionMaker], path: str) -> None:
@@ -147,7 +161,6 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
-    # Setup logging
     level = logging.DEBUG if args.verbose else logging.WARNING
     logging.basicConfig(
         level=level,
@@ -155,7 +168,6 @@ def main() -> int:
         handlers=[RichHandler(rich_tracebacks=True, show_path=False)],
     )
 
-    # Comandi informativi
     if args.list_sectors:
         sectors = sorted(set(c["sector"] for c in TOP_100_COMPANIES))
         rprint("[bold]Settori disponibili:[/bold]")
@@ -169,7 +181,7 @@ def main() -> int:
         return 0
 
     # Filtraggio aziende
-    companies = TOP_100_COMPANIES
+    companies = list(TOP_100_COMPANIES)
 
     if args.sector:
         companies = [c for c in companies if c["sector"].lower() == args.sector.lower()]
@@ -179,10 +191,7 @@ def main() -> int:
             return 1
 
     if args.company:
-        companies = [
-            c for c in companies
-            if args.company.lower() in c["name"].lower()
-        ]
+        companies = [c for c in companies if args.company.lower() in c["name"].lower()]
         if not companies:
             rprint(f"[red]Nessuna azienda trovata con nome '{args.company}'.[/red]")
             return 1
@@ -190,13 +199,15 @@ def main() -> int:
     if args.limit:
         companies = companies[: args.limit]
 
-    # Banner
     rprint(
         f"\n[bold cyan]Decision Maker Scraper[/bold cyan] "
         f"[dim]— {len(companies)} aziende da processare[/dim]\n"
     )
 
-    # Avvio scraping
+    # --- Fase 1: scraping decision makers ---
+    all_results: list[DecisionMaker] = []
+    session = SmartSession()
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -205,9 +216,7 @@ def main() -> int:
         console=console,
         transient=True,
     ) as progress:
-        task = progress.add_task("Scraping in corso...", total=len(companies))
-
-        all_results: list[DecisionMaker] = []
+        task = progress.add_task("Fase 1/2 — Scraping persone...", total=len(companies))
         for i, company in enumerate(companies, 1):
             progress.update(
                 task,
@@ -215,8 +224,6 @@ def main() -> int:
                 advance=1,
             )
             try:
-                from scraper import SmartSession, scrape_company
-                session = SmartSession()
                 results = scrape_company(
                     session, company,
                     use_duckduckgo=not args.no_ddg,
@@ -226,7 +233,26 @@ def main() -> int:
             except Exception as exc:
                 logging.error("Errore su %s: %s", company["name"], exc)
 
-    # Output
+    rprint(f"[dim]Trovati {len(all_results)} decision maker. Cerco le email...[/dim]")
+
+    # --- Fase 2: arricchimento email ---
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        progress.add_task("Fase 2/2 — Ricerca email...", total=None)
+        try:
+            enrich_with_emails(
+                session,
+                all_results,
+                use_hunter=not args.no_hunter,
+            )
+        except Exception as exc:
+            logging.error("Errore durante enrichment email: %s", exc)
+
+    # --- Output ---
     if args.out:
         out_path = Path(args.out)
         if out_path.suffix.lower() == ".json":
@@ -236,9 +262,12 @@ def main() -> int:
     else:
         print_results_table(all_results)
 
+    emails_found = sum(1 for dm in all_results if dm.email)
     rprint(
         f"\n[bold green]Completato![/bold green] "
-        f"{len(all_results)} decision maker trovati in {len(companies)} aziende.\n"
+        f"{len(all_results)} persone trovate, "
+        f"{emails_found} con email, "
+        f"in {len(companies)} aziende.\n"
     )
     return 0
 

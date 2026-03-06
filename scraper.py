@@ -63,6 +63,7 @@ class DecisionMaker:
     domain: str
     sector: str
     linkedin_url: str = ""
+    email: str = ""
     source_url: str = ""
     source: str = ""
 

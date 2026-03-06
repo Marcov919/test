@@ -4,7 +4,7 @@ Trova automaticamente CEO, CTO, CFO e altri executive nelle **100 aziende piu' f
 
 ## Come funziona
 
-Il tool usa **3 strategie di scraping in cascata**:
+### Fase 1 — Trova i decision maker (3 strategie in cascata)
 
 1. **Leadership page** — visita `/about`, `/team`, `/leadership` del sito aziendale e analizza le person card con BeautifulSoup
 2. **DuckDuckGo search** — cerca `"Azienda" CEO OR CTO site:linkedin.com/in` e parsa i risultati pubblici
@@ -12,15 +12,32 @@ Il tool usa **3 strategie di scraping in cascata**:
 
 Se una strategia trova >=3 persone, le successive vengono saltate per velocizzare.
 
+### Fase 2 — Trova le email (3 strategie in cascata)
+
+1. **Hunter.io API** (opzionale, piano gratuito: 25 ricerche/mese) — email verificate
+2. **Scraping diretto** — cerca email esplicite nelle pagine `/contact`, `/press`, `/about`
+3. **Pattern generation** — inferisce il formato email dal dominio (es. `nome.cognome@azienda.com`) e genera il candidato piu' probabile. Le email generate sono marcate con `[pattern]` per distinguerle da quelle verificate.
+
 ## Setup
 
 ```bash
 # Dipendenze Python
 pip install -r requirements.txt
-
-# (Opzionale) Playwright per siti heavy JS
-playwright install chromium
 ```
+
+### (Opzionale) Hunter.io per email verificate
+
+Hunter.io ha un **piano gratuito con 25 ricerche/mese**. Per attivarlo:
+
+1. Registrati su hunter.io (gratis)
+2. Copia la tua API Key dalla dashboard
+3. Crea un file `.env` nella cartella del progetto:
+
+```
+HUNTER_API_KEY=la_tua_chiave_qui
+```
+
+Senza Hunter.io il tool funziona lo stesso, ma le email sono generate da pattern (meno affidabili).
 
 ## Uso
 
@@ -28,7 +45,7 @@ playwright install chromium
 # Scrapa tutte le 100 aziende, stampa a schermo
 python main.py
 
-# Solo le prime 5 aziende
+# Solo le prime 5 aziende (ottimo per testare)
 python main.py --limit 5
 
 # Solo settore AI
@@ -37,7 +54,7 @@ python main.py --sector AI
 # Cerca una specifica azienda
 python main.py --company Stripe
 
-# Salva in CSV
+# Salva in CSV (apribile con Excel / Google Sheets)
 python main.py --out results.csv
 
 # Salva in JSON
@@ -45,6 +62,9 @@ python main.py --out results.json
 
 # Solo leadership page (no DuckDuckGo, no Crunchbase)
 python main.py --no-ddg --no-cb
+
+# Senza Hunter.io (usa solo scraping + pattern email)
+python main.py --no-hunter
 
 # Log dettagliato
 python main.py --verbose
@@ -67,6 +87,7 @@ Ogni decision maker trovato include:
 | `company` | Nome azienda |
 | `domain` | Dominio aziendale |
 | `sector` | Settore (AI, Fintech, ...) |
+| `email` | Email (verificata o generata da pattern — le pattern hanno `[pattern]` in fondo) |
 | `linkedin_url` | URL profilo LinkedIn (se trovato) |
 | `source_url` | URL sorgente dello scraping |
 | `source` | Strategia usata (`leadership_page`, `duckduckgo_search`, `crunchbase`) |
