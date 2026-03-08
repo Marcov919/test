@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
@@ -16,6 +17,7 @@ initDatabase();
 // Routes
 app.use('/api/patients', require('./routes/patients'));
 app.use('/api/appointments', require('./routes/appointments'));
+app.use('/api/chat', require('./routes/chat'));
 app.use('/api', require('./routes/files'));
 
 // Serve frontend in production

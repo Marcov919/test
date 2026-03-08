@@ -6,6 +6,7 @@ import AppointmentModal from './components/AppointmentModal';
 import PatientProfile from './components/PatientProfile';
 import PatientsView from './components/PatientsView';
 import PatientModal from './components/PatientModal';
+import Chatbot from './components/Chatbot';
 
 type View = 'calendar' | 'patients';
 type Modal = 'appointment' | 'newAppointment' | 'patient' | 'newPatient' | null;
@@ -282,6 +283,8 @@ export default function App() {
           onSaved={() => { closeAll(); }}
         />
       )}
+
+      <Chatbot />
 
     </div>
   );
