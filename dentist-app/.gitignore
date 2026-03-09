@@ -7,3 +7,4 @@ backend/dentist.db-wal
 backend/uploads/
 frontend/dist/
 .DS_Store
+.env
