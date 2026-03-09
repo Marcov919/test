@@ -18,9 +18,14 @@ async function sendMessage(message: string, history: Message[]): Promise<string>
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ message, history }),
   });
-  const data = await res.json();
+  let data: { reply?: string; error?: string };
+  try {
+    data = await res.json();
+  } catch {
+    throw new Error('Il server non risponde. Assicurati che il backend sia avviato (usa ./start.sh).');
+  }
   if (!res.ok) throw new Error(data.error || 'Errore sconosciuto');
-  return data.reply;
+  return data.reply!;
 }
 
 export default function Chatbot() {
