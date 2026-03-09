@@ -19,6 +19,16 @@ echo "👉 Tra qualche secondo apri il browser su: http://localhost:3000"
 echo "   (premi Ctrl+C per fermare tutto)"
 echo ""
 
+# Libera le porte 3000 e 3001 se occupate
+for PORT in 3000 3001; do
+  PID=$(lsof -ti tcp:$PORT 2>/dev/null)
+  if [ -n "$PID" ]; then
+    echo "Porta $PORT occupata (PID $PID) — la libero..."
+    kill -9 $PID 2>/dev/null
+  fi
+done
+sleep 1
+
 # Avvia backend in background
 node backend/server.js &
 BACKEND_PID=$!
