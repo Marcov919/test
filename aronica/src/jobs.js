@@ -7,7 +7,7 @@ import { CITY, geocode, inServiceArea, haversineKm, etaMinutes } from './geo.js'
 import { RATING_TAGS, enforce } from './reliability.js';
 import { HttpError, clock, id, token, iso, toCents, parseTime, NO_SUPPLY_IT } from './util.js';
 
-export const BASE_URL = () => process.env.ARONICA_PUBLIC_URL || `http://localhost:${process.env.PORT || 8787}`;
+export const BASE_URL = () => process.env.ARONICA_PUBLIC_URL ?? `http://localhost:${process.env.PORT || 8787}`;
 
 export const ACTIVE = ['assigned', 'en_route', 'on_site'];
 export const OPEN = ['negotiating', 'pending_confirmation', 'dispatching', ...ACTIVE];

@@ -1,0 +1,110 @@
+<title>Aronica</title>
+<style>
+/*APP_CSS*/
+/*SHELL_CSS*/
+</style>
+<script>document.body.classList.add('booting')</script>
+<div class="boot" id="boot"><span class="logo"><i></i>Aronica</span><div id="boot-msg">Avvio del backend nel browser…</div></div>
+
+<header class="top">
+  <span class="logo"><i></i>Aronica</span>
+  <span class="tag">Agent→Human dispatch · Milano · demo live</span>
+  <nav class="tabs" aria-label="Viste">
+    <button data-view="live" aria-selected="true">Live</button>
+    <button data-view="agent" aria-selected="false">Agente AI</button>
+    <button data-view="ops" aria-selected="false">Ops</button>
+    <button data-view="about" aria-selected="false">Come funziona</button>
+  </nav>
+</header>
+
+<section class="view" id="view-live">
+  <div id="live" data-side="buyer">
+    <div class="seg seg-live">
+      <button data-side="buyer" class="on">Cliente</button>
+      <button data-side="worker">Partner (telefono)</button>
+    </div>
+    <div class="pane-buyer">
+      <div class="b-host">
+        <div class="b-app">
+          <aside class="b-panel">
+            <div class="b-head"><span class="b-title">Buyer console</span><button class="btn sm" id="new-req">Nuova richiesta</button></div>
+            <div class="b-body" id="buyer-panel"></div>
+          </aside>
+          <div class="b-mapwrap"><div id="buyer-map" class="map"></div></div>
+        </div>
+      </div>
+    </div>
+    <div class="pane-worker">
+      <div class="phone"><div id="worker-root" class="w-host theme-dark"></div></div>
+      <div class="phone-cap">App Partner · Giulia R. è la n. 1 per i lavori vicino al Duomo</div>
+    </div>
+  </div>
+</section>
+
+<section class="view" id="view-agent" hidden><div id="agent-root" class="ag"></div></section>
+
+<section class="view" id="view-ops" hidden>
+  <div class="o-host">
+    <div class="ops">
+      <header>
+        <div class="row"><span class="badge dark">Ops · Milano</span></div>
+        <div class="row small wrap" id="ops-settings"></div>
+      </header>
+      <main id="ops-main"></main>
+      <aside>
+        <div class="mapbox"><div id="ops-map" class="map"></div></div>
+        <div class="log" id="ops-log"></div>
+      </aside>
+    </div>
+  </div>
+</section>
+
+<section class="view" id="view-about" hidden>
+  <div class="about">
+    <div>
+      <h1>Gli agenti AI assumono persone verificate per lavori fisici a Milano.</h1>
+      <p>Un agente (Claude, Grok, OpenAI…) crea un lavoro strutturato, negozia il prezzo in tempo reale con i supplier agent dei partner migliori, e un umano conferma con un tap. Da lì parte subito un'offerta a tempo alla persona con il punteggio più alto, con cascata automatica.</p>
+    </div>
+    <div>
+      <h2>Prova il percorso completo in 2 minuti</h2>
+      <ol>
+        <li><b>Live</b>, lato cliente: tocca l'esempio <i>Scaffale Esselunga</i>, poi <i>Trova persone</i>. Guarda la negoziazione A2A.</li>
+        <li>Tocca <i>Conferma</i> (Adesso o Programma).</li>
+        <li>Sul telefono arriva l'offerta a tempo per Giulia: <i>Accetto</i> → <i>Vado ora</i> → <i>Sono arrivato</i> → <i>Carica la prova</i> (foto dal tuo dispositivo + checklist).</li>
+        <li>Lato cliente vedi foto, verifica GPS e risposte. Valuta Giulia.</li>
+        <li>Prova anche <i>Capoeira</i>: fallisce in modo onesto. E la scheda <b>Agente AI</b>: lo stesso flusso via MCP.</li>
+      </ol>
+    </div>
+    <div>
+      <h2>Cosa gira qui</h2>
+      <p>Il codice del server vero (matching, negoziazione, cascata, affidabilità, MCP) compilato per il browser, con SQLite in WebAssembly. Nulla viene inviato fuori dalla pagina; ricaricando si riparte dai dati seed.</p>
+    </div>
+    <div>
+      <h2>Cosa è simulato</h2>
+      <ul>
+        <li>I partner seed diversi da quello che controlli rispondono da soli secondo il loro tasso di accettazione, e inviano foto marcate <i>FOTO SIMULATA</i>.</li>
+        <li>Lo spostamento sulla mappa è simulato (accelerato 30×); la mappa è stilizzata.</li>
+        <li>Pagamenti: escrow stub, nessun addebito reale. Verifica documenti: stub (in Ops).</li>
+        <li>L'agente AI della demo è uno script senza LLM che usa gli stessi tool MCP.</li>
+      </ul>
+    </div>
+    <div>
+      <h2>Regole di prodotto</h2>
+      <ul>
+        <li>Solo verifiche sul campo: scaffali, foto punto vendita, prezzi, presenza, sopralluoghi, documenti, mystery shopping, installazioni.</li>
+        <li>Fuori ambito, fuori Milano o nessun partner disponibile: <i>“Siamo spiacenti ma al momento non abbiamo persone sufficienti a soddisfare la richiesta.”</i></li>
+        <li>Punteggio stile Uber: ETA 35%, valutazione 25%, completamento 15%, esperienza 10%, prezzo 10%, accettazione 5%.</li>
+        <li>Affidabilità: media delle ultime 100 valutazioni, avviso sotto ★4,6, sospensione sotto ★4,4, 80% di completamento o 3 mancate presenze.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <b>Codice e server completo</b>
+      <p class="small">Repository GitHub <code>Marcov919/test</code>, branch <code>claude/loving-hamilton-csujsi</code>, cartella <code>aronica/</code>. Avvio: <code>cd aronica &amp;&amp; npm start</code>. Endpoint MCP, REST, OpenAPI: vedi <code>/docs</code> sul server.</p>
+      <p class="small"><a href="https://github.com/Marcov919/test/tree/claude/loving-hamilton-csujsi/aronica" target="_blank" rel="noopener">Apri su GitHub</a></p>
+    </div>
+  </div>
+</section>
+
+<script id="sqlwasm" type="application/octet-stream">/*SQL_WASM_B64*/</script>
+<script>/*SQL_JS*/</script>
+<script type="module">/*BUNDLE*/</script>

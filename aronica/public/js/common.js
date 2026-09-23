@@ -78,6 +78,18 @@ export function deadlineText(iso) {
   return `Entro ${dayhhmm(iso)}`;
 }
 
+// Two-tap confirmation instead of window.confirm() (blocked in embedded viewers).
+export function twoStep(label, onConfirm) {
+  return (e) => {
+    const btn = e.currentTarget;
+    if (btn.dataset.armed) { delete btn.dataset.armed; clearTimeout(btn._t); onConfirm(); return; }
+    btn.dataset.armed = '1';
+    const prev = btn.textContent;
+    btn.textContent = label;
+    btn._t = setTimeout(() => { delete btn.dataset.armed; btn.textContent = prev; }, 3500);
+  };
+}
+
 let toastTimer;
 export function toast(msg, err = false) {
   let t = document.getElementById('toast');

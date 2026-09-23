@@ -2,10 +2,12 @@
 // button, full-screen timed offers with Accetto / Rifiuto, guided proof capture.
 import {
   h, mount, api, sse, eur, pct, hhmm, dayhhmm, deadlineText, toast, icon, avatar, vehicleIcon, VEHICLE_IT,
-  ring, createMap, taskPin, mePin,
+  ring, createMap, taskPin, mePin, twoStep,
 } from './common.js';
 
-const root = document.getElementById('root');
+let root;
+let demo = false;
+const $r = (sel) => root.querySelector(sel);
 const TOKEN_KEY = 'aronica.worker_token';
 let token = null;
 try { token = localStorage.getItem(TOKEN_KEY); } catch { /* private mode */ }
@@ -25,8 +27,16 @@ const hdr = () => ({ 'X-Worker-Token': token });
 const wapi = (path, opts = {}) => api(path, { ...opts, headers: { ...hdr(), ...(opts.headers ?? {}) } });
 
 // ------------------------------------------------------------------ boot
-async function boot() {
+export async function mountWorker(el, { autoLogin = null, demo: isDemo = false } = {}) {
+  root = el;
+  demo = isDemo;
   cfg = await api('/api/config');
+  if (!token && autoLogin) {
+    try {
+      token = (await api('/api/worker/login', { method: 'POST', body: { worker_id: autoLogin } })).token;
+      try { localStorage.setItem(TOKEN_KEY, token); } catch { /* */ }
+    } catch { /* fall through to the picker */ }
+  }
   if (!token) return renderLogin();
   try {
     await refresh();
@@ -114,7 +124,7 @@ async function renderLogin() {
       h('div.small.muted', {}, `${w.zone} · ${VEHICLE_IT[w.vehicle]} · ${w.skills.length} competenze`)),
     statusBadge(w), icon('chevron'));
   mount(root, h('div.w-login', {}, h('div.inner', {},
-    h('div.row.between', {}, h('span.logo', {}, h('i'), 'Aronica ', h('span.faint', { style: { fontWeight: 600 } }, 'Partner')), h('a.small.muted', { href: '/' }, 'Home')),
+    h('div.row.between', {}, h('span.logo', {}, h('i'), 'Aronica ', h('span.faint', { style: { fontWeight: 600 } }, 'Partner')), demo ? null : h('a.small.muted', { href: '/' }, 'Home')),
     h('div', {}, h('h1', {}, 'Lavora quando vuoi, a Milano.'), h('p.muted', {}, 'Ricevi incarichi già strutturati: scadenza, istruzioni, compenso e prova richiesta. Tu scegli: Accetto o Rifiuto.')),
     h('button.btn.primary.lg.block', { onclick: renderSignup }, 'Registrati come persona o attività'),
     h('div.sep'),
@@ -133,7 +143,7 @@ function renderSignup() {
   const vals = {};
   const draw = () => {
     // keep typed values across re-renders (toggling chips / kind)
-    for (const k of FIELDS) { const el = document.getElementById(k); if (el) vals[k] = el.value; }
+    for (const k of FIELDS) { const el = $r(`#${k}`); if (el) vals[k] = el.value; }
     mount(form,
       h('div.seg', {},
         h('button', { class: kind === 'person' ? 'on' : '', onclick: () => { kind = 'person'; draw(); } }, 'Persona'),
@@ -159,7 +169,7 @@ function renderSignup() {
     for (const k of FIELDS) { const el = form.querySelector(`#${k}`); if (el && vals[k] != null) el.value = vals[k]; }
   };
   const submit = async () => {
-    const v = (id) => document.getElementById(id)?.value;
+    const v = (id) => $r(`#${id}`)?.value;
     try {
       const r = await api('/api/worker/signup', {
         method: 'POST',
@@ -190,7 +200,7 @@ function renderApp() {
       h('div.w-top', { id: 'top' }),
       h('div', { id: 'go' }),
       h('section.w-sheet', { id: 'sheet' })));
-    map = createMap(document.getElementById('map'), { dark: true, zoom: 14, center: { lat: me.worker.lat, lng: me.worker.lng } });
+    map = createMap($r('#map'), { dark: true, zoom: 14, center: { lat: me.worker.lat, lng: me.worker.lng } });
   }
   renderTop();
   renderSheet();
@@ -199,20 +209,20 @@ function renderApp() {
 
 function renderTop() {
   const w = me.worker;
-  mount(document.getElementById('top'),
+  mount($r('#top'),
     h('button.w-iconbtn', { onclick: showProfile, title: 'Profilo' }, icon('menu')),
     h('button.w-pill.num', { onclick: showProfile }, h('small', {}, 'Guadagni'), eur(w.earnings_cents)),
     h('button.w-iconbtn', { onclick: showProfile, style: { background: w.avatar_color, color: '#fff', fontWeight: 800 } }, w.display_name.split(' ').map((p) => p[0]).join('').slice(0, 2)));
 }
 
 function sheetHeight() {
-  return document.getElementById('sheet')?.offsetHeight ?? 200;
+  return $r('#sheet')?.offsetHeight ?? 200;
 }
 
 function renderSheet() {
   const w = me.worker;
-  const sheet = document.getElementById('sheet');
-  const go = document.getElementById('go');
+  const sheet = $r('#sheet');
+  const go = $r('#go');
   mount(go);
   const job = currentJob();
   const banners = [];
@@ -227,7 +237,7 @@ function renderSheet() {
     return mount(sheet,
       h('h2', {}, 'Account in verifica'),
       h('p.muted', {}, w.kind === 'business' ? 'Stiamo verificando visura camerale e Partita IVA.' : 'Stiamo verificando documento d\'identità e selfie.'),
-      h('div.w-banner.blue', {}, icon('shield'), h('div', {}, 'Niente "registrazione teatro": solo profili verificati ricevono lavori. In questa demo la verifica la fa l\'operatore in ', h('a', { href: '/ops', target: '_blank' }, 'Ops'), '.')),
+      h('div.w-banner.blue', {}, icon('shield'), h('div', {}, 'Niente "registrazione teatro": solo profili verificati ricevono lavori. In questa demo la verifica la fa l\'operatore in ', demo ? 'Ops (scheda in alto)' : h('a', { href: '/ops', target: '_blank' }, 'Ops'), '.')),
       h('div.sep'), h('button.btn.block', { onclick: logout }, 'Esci'));
   }
   if (w.status === 'suspended') {
@@ -359,7 +369,7 @@ function openOverlay(el, kind) {
   closeOverlay();
   el.dataset.kind = kind;
   overlay = el;
-  document.body.append(el);
+  root.append(el);
 }
 function closeOverlay() {
   overlay?.remove();
@@ -411,7 +421,7 @@ function renderJobSheet(job) {
         ...job.proof_requirements.checklist.map((c) => h('span.badge', {}, c.q)))),
     ['assigned', 'en_route'].includes(job.status)
       ? h('div.center', { style: { marginTop: '14px' } }, h('button.linkbtn', {
-        onclick: () => { if (confirm('Annullare? Il lavoro torna in coda e il tasso di cancellazione peggiora.')) act('cancel', { reason: 'worker_cancel' }); },
+        onclick: twoStep('Tocca di nuovo: il lavoro torna in coda e peggiora il tuo tasso di cancellazione', () => act('cancel', { reason: 'worker_cancel' })),
       }, 'Non posso più farlo'))
       : null);
 }
@@ -420,9 +430,9 @@ function updateLiveBits() {
   const job = currentJob();
   if (!job || job.status !== 'en_route') return;
   const dist = job._remaining_m ?? 0;
-  const el = document.getElementById('liveDist');
+  const el = $r('#liveDist');
   if (el) mount(el, icon('route'), fmtDist(dist));
-  const btn = document.getElementById('arriveBtn');
+  const btn = $r('#arriveBtn');
   if (btn) {
     const inside = dist <= job.proof_requirements.gps_radius_m;
     btn.disabled = !inside;
@@ -588,8 +598,8 @@ function showProfile() {
     me.history.length ? h('div.list', {}, me.history.map((j) => h('div.item', {},
       h('div.grow', {}, h('div.small', {}, j.title), h('div.xs.faint', {}, `${dayhhmm(j.completed_at)} · ${j.status}`)),
       h('b.num', { style: { color: j.pay_cents ? 'var(--accent)' : 'var(--fg-3)' } }, j.pay_cents ? `+${eur(j.pay_cents)}` : '—')))) : h('div.small.muted', {}, 'Nessun lavoro ancora.'),
-    h('h3', { style: { margin: '20px 0 8px' } }, 'Posizione'),
-    h('label.row.small', {},
+    demo ? null : h('h3', { style: { margin: '20px 0 8px' } }, 'Posizione'),
+    demo ? null : h('label.row.small', {},
       h('input', {
         type: 'checkbox', checked: !!w.real_gps,
         onchange: (e) => toggleRealGps(e.target.checked),
@@ -610,4 +620,3 @@ function toggleRealGps(on) {
   );
 }
 
-boot().catch((e) => { console.error(e); toast(e.message, true); });

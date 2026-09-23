@@ -11,7 +11,10 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 </head>
 <body class="theme-dark">
-  <div id="root"></div>
-  <script type="module" src="/js/worker.js"></script>
+  <div id="root" class="w-host"></div>
+  <script type="module">
+    import { mountWorker } from '/js/worker.js';
+    mountWorker(document.getElementById('root'));
+  </script>
 </body>
 </html>

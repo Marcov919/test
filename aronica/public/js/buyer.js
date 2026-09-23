@@ -2,10 +2,12 @@
 // → Uber-style one-tap confirm (Adesso / Programma) → live status to Fatto.
 import {
   h, mount, api, sse, eur, pct, hhmm, dayhhmm, deadlineText, toast, icon, avatar, VEHICLE_IT,
-  createMap, taskPin, workerPin, lightbox,
+  createMap, taskPin, workerPin, lightbox, twoStep,
 } from './common.js';
 
-const panel = document.getElementById('panel');
+let panel;
+let useHash = true;
+let memRoute = '#/';
 const MY_JOBS = 'aronica.buyer_jobs';
 let cfg;
 let map;
@@ -22,10 +24,17 @@ function remember(id, token, title) {
 function clearTimers() { timers.forEach(clearInterval); timers = []; }
 
 // ------------------------------------------------------------------ router
+// Navigation: URL hash in the standalone page, in-memory inside the demo shell.
+export function go(r) {
+  if (useHash) location.hash = r;
+  else { memRoute = r; route(); }
+}
+export function openBuyerJob(id, token) { go(`#/job/${id}?t=${token}`); }
+
 async function route() {
   clearTimers();
   es?.close(); es = null;
-  const m = /^#\/job\/([^?]+)\?t=(.+)$/.exec(location.hash);
+  const m = /^#\/job\/([^?]+)\?t=(.+)$/.exec(useHash ? location.hash : memRoute);
   if (m) return openJob(decodeURIComponent(m[1]), decodeURIComponent(m[2]));
   return renderHome();
 }
@@ -106,7 +115,7 @@ async function renderHome() {
       remember(r.job.id, r.token, r.job.title);
       // The console's buyer agent starts negotiating right away.
       api(`/api/jobs/${r.job.id}/auto-negotiate?t=${encodeURIComponent(r.token)}`, { method: 'POST', body: {} }).catch(() => {});
-      location.hash = `#/job/${r.job.id}?t=${r.token}`;
+      go(`#/job/${r.job.id}?t=${r.token}`);
     } catch (e) {
       btn.disabled = false;
       mount(result, honest(e.message, e.data?.detail));
@@ -127,7 +136,7 @@ async function renderHome() {
     result,
     h('button.btn.primary.lg.block', { onclick: (e) => submit(e.currentTarget) }, 'Trova persone'),
     mine.length ? h('div', {}, h('h3', { style: { margin: '12px 0 6px' } }, 'Le tue richieste'),
-      h('div.list', {}, mine.slice(0, 8).map((j) => h('a.item', { href: `#/job/${j.id}?t=${j.token}`, style: { textDecoration: 'none' } },
+      h('div.list', {}, mine.slice(0, 8).map((j) => h('a.item.clickable', { onclick: () => go(`#/job/${j.id}?t=${j.token}`), style: { textDecoration: 'none' } },
         icon('list'), h('div.grow.small', {}, j.title, h('div.xs.faint', {}, new Date(j.at).toLocaleString('it-IT'))), icon('chevron'))))) : null,
     h('div.card.flat.small', {}, h('b', {}, 'Hai un agente AI? '), 'Claude, Grok, OpenAI o qualsiasi agente con tool-use può creare e negoziare lavori via MCP/API. Tu ricevi il link di conferma. ', h('a', { href: '/docs' }, 'Connetti un agente →')),
   );
@@ -147,7 +156,7 @@ async function openJob(id, token) {
     state = { job: r.job, quotes: r.quotes, token };
     remember(id, token, r.job.title);
   } catch (e) {
-    mount(panel, honest('Link non valido', e.message), h('a.btn.block', { href: '#/' }, 'Nuova richiesta'));
+    mount(panel, honest('Link non valido', e.message), h('button.btn.block', { onclick: () => go('#/') }, 'Nuova richiesta'));
     return;
   }
   map.clear();
@@ -176,7 +185,7 @@ function onJobEvent(e) {
       state.job.worker.position = { lat: e.data.lat, lng: e.data.lng };
       state.job.worker.eta_min = e.data.eta_min;
       drawJobMap(true);
-      const el = document.getElementById('etaBig');
+      const el = panel.querySelector('#etaBig');
       if (el) el.textContent = etaLine(state.job);
     }
     return;
@@ -184,7 +193,7 @@ function onJobEvent(e) {
   // Append live transcript events without a full re-render (feels live).
   if (e.type.startsWith('negotiation.') && e.type !== 'negotiation.deal') {
     state.job.events = [...(state.job.events ?? []), e];
-    const chat = document.getElementById('chat');
+    const chat = panel.querySelector('#chat');
     if (chat) { appendChatEvent(chat, e); chat.lastElementChild?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }
     if (e.type === 'negotiation.failed') refetch();
     return;
@@ -215,7 +224,7 @@ function renderJob(statusChanged) {
     default: body = viewClosed(j);
   }
   mount(panel, header, body);
-  const chat = document.getElementById('chat');
+  const chat = panel.querySelector('#chat');
   if (chat && j.status === 'negotiating') chat.lastElementChild?.scrollIntoView({ block: 'nearest' });
 }
 
@@ -458,12 +467,12 @@ function viewClosed(j) {
   const title = { no_match: 'Nessuna persona disponibile', expired: 'Scaduto', cancelled: 'Annullato' }[j.status] ?? j.status_label;
   return h('div.col', { style: { gap: '14px' } },
     honest(j.status_message || title, j.escrow ? `Escrow: ${j.escrow.status}${j.escrow.cancel_fee_cents ? ` · penale ${eur(j.escrow.cancel_fee_cents)}` : ''}` : null),
-    h('a.btn.primary.block', { href: '#/' }, 'Nuova richiesta'),
+    h('button.btn.primary.block', { onclick: () => go('#/') }, 'Nuova richiesta'),
     (j.events ?? []).some((e) => e.type.startsWith('negotiation.')) ? h('details', {}, h('summary.small', {}, 'Trascrizione'), transcript(j)) : null);
 }
 
-async function cancelJob() {
-  if (!confirm('Annullare la richiesta?')) return;
+const cancelJob = twoStep('Tocca di nuovo per annullare', doCancel);
+async function doCancel() {
   try {
     await api(`/api/jobs/${state.job.id}/cancel?t=${encodeURIComponent(state.token)}`, { method: 'POST', body: {} });
     refetch();
@@ -487,9 +496,11 @@ function drawJobMap(animate, refit = true) {
 }
 
 // ------------------------------------------------------------------ boot
-(async () => {
+export async function mountBuyer({ panelEl, mapEl, hash = true }) {
+  panel = panelEl;
+  useHash = hash;
   cfg = await api('/api/config');
-  map = createMap(document.getElementById('map'), { zoom: 13, onClick: (p) => map.onPick?.(p) });
-  window.addEventListener('hashchange', route);
+  map = createMap(mapEl, { zoom: 13, onClick: (p) => map.onPick?.(p) });
+  if (useHash) window.addEventListener('hashchange', route);
   route();
-})();
+}

@@ -2,8 +2,9 @@
 // dispatch cascade, event log, demo settings, API keys.
 import { h, mount, api, sse, eur, pct, hhmm, toast, avatar, createMap, taskPin, workerPin, VEHICLE_IT } from './common.js';
 
-const main = document.getElementById('main');
-const log = document.getElementById('log');
+let main;
+let log;
+let settingsEl;
 let map;
 let state;
 let newKey = null;
@@ -26,7 +27,7 @@ async function act(path, body) {
 
 function render() {
   const s = state.settings;
-  mount(document.getElementById('settings'),
+  mount(settingsEl,
     h('label.row', {}, 'TTL offerta', h('input.input', { type: 'number', min: 5, max: 120, value: s.offer_ttl_s, style: { width: '72px', padding: '6px 8px' }, onchange: (e) => act('/api/ops/settings', { offer_ttl_s: Number(e.target.value) }) }), 's'),
     h('label.row', {}, 'Velocità sim.', h('input.input', { type: 'number', min: 1, max: 120, value: s.sim_speedup, style: { width: '72px', padding: '6px 8px' }, onchange: (e) => act('/api/ops/settings', { sim_speedup: Number(e.target.value) }) }), '×'),
     h('label.row', {}, h('input', { type: 'checkbox', checked: s.simulate_workers, onchange: (e) => act('/api/ops/settings', { simulate_workers: e.target.checked }) }), 'Simula profili demo'));
@@ -92,7 +93,7 @@ function render() {
         h('input.input', { id: 'keyname', placeholder: 'Nome agente (es. Grok Bot)', style: { maxWidth: '260px' } }),
         h('button.btn.sm.primary', {
           onclick: async () => {
-            const r = await api('/api/ops/keys', { method: 'POST', body: { name: document.getElementById('keyname').value || 'Agent' } });
+            const r = await api('/api/ops/keys', { method: 'POST', body: { name: main.querySelector('#keyname').value || 'Agent' } });
             newKey = r.api_key; load();
           },
         }, 'Crea chiave'))));
@@ -122,8 +123,9 @@ function logLine(e) {
   while (log.childElementCount > 200) log.lastElementChild.remove();
 }
 
-(async () => {
-  map = createMap(document.getElementById('map'), { zoom: 12 });
+export async function mountOps({ mainEl, logEl, settingsEl: setEl, mapEl }) {
+  main = mainEl; log = logEl; settingsEl = setEl;
+  map = createMap(mapEl, { zoom: 12 });
   await load();
   for (const e of [...state.events].reverse()) logLine(e);
   sse('/api/stream?ops=1', (e) => {
@@ -135,4 +137,4 @@ function logLine(e) {
     logLine(e);
     reload();
   });
-})();
+}

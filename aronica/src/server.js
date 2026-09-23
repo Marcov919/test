@@ -404,7 +404,12 @@ async function serveStatic(req, res, url) {
 
 // ---------------------------------------------------------------- server
 export function createApp() {
-  return http.createServer(async (req, res) => {
+  return http.createServer(handleRequest);
+}
+
+// Plain (req, res) handler: used by node:http and by the in-browser demo build.
+export async function handleRequest(req, res) {
+  {
     const url = new URL(req.url, 'http://x');
     const isApi = url.pathname.startsWith('/v1') || url.pathname === '/mcp' || url.pathname === '/openapi.json';
     if (isApi) {
@@ -432,7 +437,7 @@ export function createApp() {
       console.error(e);
       json(res, 500, { error: 'internal_error', message: 'Internal error' });
     }
-  });
+  }
 }
 
 export function startLoop(tickMs = Number(process.env.ARONICA_TICK_MS ?? 2000)) {

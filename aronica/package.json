@@ -2,15 +2,25 @@
   "name": "aronica",
   "version": "0.1.0",
   "private": true,
-  "description": "Aronica — Agent→Human dispatch layer. AI agents hire verified people for physical tasks in Milano.",
+  "description": "Aronica \u2014 Agent\u2192Human dispatch layer. AI agents hire verified people for physical tasks in Milano.",
   "type": "module",
-  "engines": { "node": ">=22.5" },
-  "bin": { "aronica-mcp": "bin/aronica-mcp-stdio.js" },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "bin": {
+    "aronica-mcp": "bin/aronica-mcp-stdio.js"
+  },
   "scripts": {
     "start": "node --no-warnings=ExperimentalWarning src/server.js",
     "dev": "node --no-warnings=ExperimentalWarning --watch src/server.js",
     "seed": "node --no-warnings=ExperimentalWarning src/seed.js --reset",
     "test": "node --no-warnings=ExperimentalWarning --test test/*.test.js",
-    "demo:agent": "node examples/buyer-agent.js"
+    "demo:agent": "node examples/buyer-agent.js",
+    "build:demo": "node demo/build.mjs"
+  },
+  "devDependencies": {
+    "buffer": "^6.0.3",
+    "esbuild": "^0.25.12",
+    "sql.js": "^1.14.2"
   }
 }

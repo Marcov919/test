@@ -255,9 +255,12 @@ export function submitProof(workerId, jobId, { photos = [], answers = {}, simula
     emit('job.proof_rejected', { job_id: jobId, worker_id: workerId, data: { problems } });
     throw new HttpError(422, 'proof_rejected', 'La prova non soddisfa i requisiti', { problems });
   }
+  // The in-browser demo has no file server: keep photos inline as data URLs.
+  const inline = globalThis.ARONICA_INLINE_UPLOADS;
   const dir = join(UPLOAD_DIR(), jobId);
-  mkdirSync(dir, { recursive: true });
+  if (!inline) mkdirSync(dir, { recursive: true });
   const urls = decoded.map((p, i) => {
+    if (inline) return `data:${p.mime};base64,${p.buf.toString('base64')}`;
     const name = `${token(9)}-${i + 1}.${EXT[p.mime]}`;
     writeFileSync(join(dir, name), p.buf);
     return `/uploads/${jobId}/${name}`;

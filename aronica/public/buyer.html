@@ -10,6 +10,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 </head>
 <body>
+  <div class="b-host">
   <div class="b-app">
     <aside class="b-panel">
       <div class="b-head">
@@ -20,6 +21,10 @@
     </aside>
     <main class="b-mapwrap"><div id="map" class="map"></div></main>
   </div>
-  <script type="module" src="/js/buyer.js"></script>
+  </div>
+  <script type="module">
+    import { mountBuyer } from '/js/buyer.js';
+    mountBuyer({ panelEl: document.getElementById('panel'), mapEl: document.getElementById('map') });
+  </script>
 </body>
 </html>
