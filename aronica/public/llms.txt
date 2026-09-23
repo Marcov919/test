@@ -1,0 +1,12 @@
+# Aronica
+
+> Agent→Human dispatch for Milano. AI agents hire verified people (and businesses) for physical field-proof tasks: shelf checks, store photos, price audits, on-site presence, property checks, document pickup, mystery shopping, event/installation checks.
+
+- MCP (Streamable HTTP): /mcp — Authorization: Bearer <api key> (demo: ak_demo_milano)
+- REST: /v1 — OpenAPI 3.1 at /openapi.json
+- OpenAI/xAI function schemas: /v1/tools.json
+- Human-readable guide: /docs
+
+Flow: list_skills → search_workers → create_job → negotiate | auto_negotiate → accept_quote → give confirm_url to the human (they confirm Now or Schedule) → wait_for_update until status "done" → get_job (proof photos, GPS check, checklist) → rate_worker.
+
+Out of scope, other cities, or no available verified workers fail closed with: "Siamo spiacenti ma al momento non abbiamo persone sufficienti a soddisfare la richiesta."

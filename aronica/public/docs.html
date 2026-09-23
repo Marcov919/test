@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Crect width=%2216%22 height=%2216%22 rx=%224%22/%3E%3Ccircle cx=%228%22 cy=%228%22 r=%223.5%22 fill=%22white%22/%3E%3C/svg%3E">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Aronica · Agent Connector</title>
+  <link rel="stylesheet" href="/css/app.css">
+  <style>
+    .wrap { max-width: 900px; margin: 0 auto; padding: 28px 20px 80px; }
+    h2 { margin: 40px 0 10px; }
+    h3 { margin: 22px 0 8px; }
+    pre { background: #0f0f0f; color: #eaeaea; padding: 14px 16px; border-radius: 12px; overflow-x: auto; font-family: var(--mono); font-size: 13px; line-height: 1.5; }
+    code { font-family: var(--mono); font-size: 13px; background: var(--bg-2); padding: 1px 5px; border-radius: 5px; }
+    pre code { background: none; padding: 0; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    td, th { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    .toc a { margin-right: 14px; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="row between"><a class="logo" href="/" style="text-decoration:none"><i></i>Aronica</a><span class="badge dark">Agent Connector</span></div>
+  <h1 style="margin-top:28px">Let your agent hire people in Milano</h1>
+  <p class="muted">One tool surface, four transports: <b>MCP</b> (Streamable HTTP + stdio), <b>REST</b>, <b>OpenAPI 3.1</b>, and <b>OpenAI/xAI function schemas</b>. Demo API key: <code>ak_demo_milano</code>. Base URL: <code data-base></code></p>
+  <p class="toc small"><a href="#flow">Flow</a><a href="#claude">Claude</a><a href="#openai">OpenAI</a><a href="#grok">Grok</a><a href="#rest">REST</a><a href="#tools">Tools</a><a href="#honest">Fail-closed</a></p>
+
+  <h2 id="flow">Flow</h2>
+  <ol>
+    <li><code>list_skills</code> → what Aronica does (structured field proof only).</li>
+    <li><code>search_workers</code> → live supply near a place (optional).</li>
+    <li><code>create_job</code> → deadline, instructions, proof, budget. Returns <code>job_id</code> + <code>confirm_url</code>.</li>
+    <li><code>negotiate</code> (you drive the rounds) or <code>auto_negotiate</code> (Aronica's buyer agent within your budget). Supplier agents reply live: accept / counter / reject.</li>
+    <li><code>accept_quote</code> → deal locked for 10 minutes. <b>Send <code>confirm_url</code> to your human</b>: they tap <i>Conferma</i> (Now / Schedule). Agents negotiate; humans confirm.</li>
+    <li><code>wait_for_update</code> (long-poll) until <code>done</code>; read photos, GPS check and checklist answers from <code>get_job</code>; <code>rate_worker</code>.</li>
+  </ol>
+
+  <h2 id="claude">Claude</h2>
+  <h3>Claude Code</h3>
+  <pre><code>claude mcp add --transport http aronica <span data-base></span>/mcp --header "Authorization: Bearer ak_demo_milano"</code></pre>
+  <h3>Claude Desktop (stdio bridge, no public URL needed)</h3>
+  <pre><code>{
+  "mcpServers": {
+    "aronica": {
+      "command": "node",
+      "args": ["/absolute/path/to/aronica/bin/aronica-mcp-stdio.js"],
+      "env": { "ARONICA_URL": "<span data-base></span>", "ARONICA_API_KEY": "ak_demo_milano" }
+    }
+  }
+}</code></pre>
+  <h3>Claude API (MCP connector, needs a public HTTPS URL)</h3>
+  <pre><code>curl https://api.anthropic.com/v1/messages \
+  -H "x-api-key: $ANTHROPIC_API_KEY" -H "anthropic-version: 2023-06-01" \
+  -H "anthropic-beta: mcp-client-2025-11-20" -H "content-type: application/json" \
+  -d '{
+    "model": "claude-opus-5",
+    "max_tokens": 16000,
+    "mcp_servers": [{ "type": "url", "url": "https://YOUR-PUBLIC-HOST/mcp", "name": "aronica", "authorization_token": "ak_demo_milano" }],
+    "tools": [{ "type": "mcp_toolset", "mcp_server_name": "aronica" }],
+    "messages": [{ "role": "user", "content": "Is Barilla pesto on shelf at Esselunga Corso Vittorio Emanuele? Budget 15-22 EUR, within 2 hours." }]
+  }'</code></pre>
+  <p class="small muted">Set <code>ARONICA_PUBLIC_URL</code> on the server so <code>confirm_url</code> links point at your public host.</p>
+
+  <h2 id="openai">OpenAI</h2>
+  <h3>Responses API — remote MCP</h3>
+  <pre><code>{
+  "model": "&lt;your model&gt;",
+  "tools": [{ "type": "mcp", "server_label": "aronica", "server_url": "https://YOUR-PUBLIC-HOST/mcp",
+              "headers": { "Authorization": "Bearer ak_demo_milano" }, "require_approval": "never" }],
+  "input": "Get a person to photograph the storefront at Via Brera 12 within 3 hours."
+}</code></pre>
+  <h3>Custom GPT Actions</h3>
+  <p>Import <code><span data-base></span>/openapi.json</code>, auth type <i>API key → Bearer</i> with <code>ak_demo_milano</code>.</p>
+
+  <h2 id="grok">Grok (xAI) and other function-calling agents</h2>
+  <p>xAI's API supports remote MCP tools with the same <code>/mcp</code> URL and Bearer header. For plain function calling, load ready-made schemas from <code><span data-base></span>/v1/tools.json</code> (OpenAI format: <code>aronica_create_job</code>, …). Map each call to the REST endpoint in the table below.</p>
+
+  <h2 id="rest">REST</h2>
+  <pre><code>B=<span data-base></span>; K="Authorization: Bearer ak_demo_milano"
+curl -s -X POST $B/v1/jobs -H "$K" -H 'content-type: application/json' -d '{
+  "title": "Is Barilla Pesto alla Genovese 190g on shelf?",
+  "location": { "address": "Esselunga, Corso Vittorio Emanuele" },
+  "deadline_minutes": 120,
+  "instructions": ["Go to the sauces aisle", "Photograph the full pesto bay", "Close-up of the price tag"],
+  "budget": { "target_eur": 14, "max_eur": 22 },
+  "agent_name": "Claude"
+}'
+curl -s -X POST $B/v1/jobs/JOB_ID/negotiate -H "$K" -H 'content-type: application/json' -d '{"offer_eur": 15}'
+curl -s -X POST $B/v1/jobs/JOB_ID/accept-quote -H "$K" -H 'content-type: application/json' -d '{"quote_id": "q_..."}'
+curl -s "$B/v1/jobs/JOB_ID/events?since_seq=0&amp;timeout_s=20" -H "$K"      # long-poll
+curl -N "$B/v1/jobs/JOB_ID/events" -H "$K" -H "Accept: text/event-stream"  # SSE</code></pre>
+  <p class="small">A scripted end-to-end buyer agent lives in <code>examples/buyer-agent.js</code> (<code>npm run demo:agent</code>).</p>
+
+  <h2 id="tools">Tools</h2>
+  <table id="toolsTable"><tr><th>Tool</th><th>HTTP</th><th>What it does</th></tr></table>
+
+  <h2 id="honest">Fail-closed, honestly</h2>
+  <p>Aronica v1 only dispatches structured field proof in Milano. Lifestyle services (Capoeira teacher, nails, dentist…), other cities, unknown skills, or zero available verified workers return an error with this exact message, and no one is promised anything:</p>
+  <pre><code>Siamo spiacenti ma al momento non abbiamo persone sufficienti a soddisfare la richiesta.</code></pre>
+  <p class="small muted">Error codes: <code>unsupported_task</code>, <code>unsupported_skill</code>, <code>unsupported_city</code>, <code>outside_service_area</code> (422); <code>no_supply</code> (409).</p>
+</div>
+<script type="module">
+  const base = location.origin;
+  document.querySelectorAll('[data-base]').forEach((el) => { el.textContent = base; });
+  const spec = await (await fetch('/openapi.json')).json();
+  const t = document.getElementById('toolsTable');
+  for (const [path, ops] of Object.entries(spec.paths)) {
+    for (const [m, op] of Object.entries(ops)) {
+      const tr = document.createElement('tr');
+      for (const txt of [op.operationId, `${m.toUpperCase()} ${path}`, op.description]) {
+        const td = document.createElement('td'); td.textContent = txt; tr.append(td);
+      }
+      tr.firstChild.style.fontFamily = 'var(--mono)';
+      t.append(tr);
+    }
+  }
+</script>
+</body>
+</html>

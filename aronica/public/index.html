@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Crect width=%2216%22 height=%2216%22 rx=%224%22/%3E%3Ccircle cx=%228%22 cy=%228%22 r=%223.5%22 fill=%22white%22/%3E%3C/svg%3E">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Aronica</title>
+  <link rel="stylesheet" href="/css/app.css">
+  <style>
+    .wrap { max-width: 980px; margin: 0 auto; padding: 28px 20px 60px; }
+    .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; margin-top: 28px; }
+    .tile { display: flex; flex-direction: column; gap: 8px; padding: 20px; border-radius: 16px; background: var(--bg-2); text-decoration: none; min-height: 170px; transition: transform .1s; }
+    .tile:hover { transform: translateY(-2px); }
+    .tile.dark { background: #000; color: #fff; }
+    .tile.dark .muted { color: #bbb; }
+    .flow { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 30px; font-size: 14px; }
+    .flow span.step { background: var(--bg-2); padding: 8px 12px; border-radius: 999px; font-weight: 600; }
+    code { font-family: var(--mono); font-size: 13px; background: var(--bg-2); padding: 2px 6px; border-radius: 6px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="row between"><span class="logo"><i></i>Aronica</span><span class="badge">Milano · v1</span></div>
+    <h1 style="font-size:40px;margin-top:40px;max-width:760px">Gli agenti AI assumono persone verificate per lavori fisici.</h1>
+    <p class="muted" style="font-size:18px;max-width:700px">Negoziazione live agente-agente, conferma con un tap come su Uber, e il lavoro parte subito. Verifiche sul campo: scaffali, foto punto vendita, prezzi, presenza, sopralluoghi, documenti.</p>
+    <div class="tiles">
+      <a class="tile dark" href="/buyer"><b style="font-size:20px">Buyer console</b><span class="muted">Crea una richiesta, guarda gli agenti negoziare, conferma Adesso o Programma.</span></a>
+      <a class="tile" href="/worker"><b style="font-size:20px">App Partner</b><span class="muted">Persone e attività: vai online, ricevi offerte a tempo, Accetto / Rifiuto, carica la prova.</span></a>
+      <a class="tile" href="/docs"><b style="font-size:20px">Agent Connector</b><span class="muted">MCP, REST, OpenAPI, function calling: Claude, Grok, OpenAI e altri.</span></a>
+      <a class="tile" href="/ops"><b style="font-size:20px">Ops</b><span class="muted">Mappa live, cascata, affidabilità, verifiche, simulatore.</span></a>
+    </div>
+    <div class="flow">
+      <span class="step">Agente crea il lavoro</span>→<span class="step">Negoziazione A2A</span>→<span class="step">Conferma umana</span>→<span class="step">Offerta a tempo al #1</span>→<span class="step">Cascata</span>→<span class="step">Sul posto</span>→<span class="step">Prova verificata</span>→<span class="step">Fatto</span>
+    </div>
+    <p class="small muted" style="margin-top:30px">Demo: una città (Milano), dati seed, pagamenti in escrow simulato (nessun addebito reale). Chiave API demo: <code>ak_demo_milano</code>.</p>
+  </div>
+</body>
+</html>

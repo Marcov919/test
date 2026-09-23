@@ -1,3 +1,5 @@
+> **Aronica** (Agent→Human dispatch, Milano v1) lives in [`aronica/`](aronica/README.md) — `cd aronica && npm start`.
+
 # Decision Maker Scraper
 
 Trova automaticamente CEO, CTO, CFO e altri executive nelle **100 aziende piu' fighe del momento** (AI, Fintech, Biotech, Spazio, Robotics, ecc.).
