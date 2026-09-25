@@ -51,6 +51,8 @@ export const EVENT_TYPES = [
   'dispatch.offer_sent', 'dispatch.offer_expired', 'dispatch.offer_declined', 'dispatch.offer_accepted', 'dispatch.skipped', 'dispatch.pool_extended',
   'escrow.held', 'escrow.released', 'escrow.refunded', 'worker.location', 'worker.online', 'worker.offline', 'worker.tier_changed',
   'worker.no_show', 'worker.verified', 'worker.reinstated', 'worker.signed_up', 'rating.created', 'rating.buyer_rated',
+  'negotiation.counters', 'job.in_progress', 'job.fully_staffed', 'job.partially_filled', 'assignment.no_show', 'assignment.done',
+  'dispatch.replacement', 'clock.changed',
 ];
 export function sse(url, onEvent) {
   const es = new EventSource(url);
@@ -68,8 +70,12 @@ export const dayhhmm = (iso) => (iso ? new Date(iso).toLocaleString('it-IT', { w
 export function initials(name = '') {
   return name.split(/\s+/).filter(Boolean).slice(0, 2).map((p) => p[0]).join('').toUpperCase();
 }
+// The demo can fast-forward the server clock (Ops → time travel).
+let clockOffset = 0;
+export const setClockOffset = (ms) => { clockOffset = Number(ms) || 0; };
+export const serverNow = () => Date.now() + clockOffset;
 export function minsUntil(iso) {
-  return Math.round((new Date(iso).getTime() - Date.now()) / 60000);
+  return Math.round((new Date(iso).getTime() - serverNow()) / 60000);
 }
 export function deadlineText(iso) {
   const m = minsUntil(iso);

@@ -5,7 +5,7 @@ export const CITY = {
   code: 'milano',
   name: 'Milano',
   center: { lat: 45.4642, lng: 9.19 }, // Duomo
-  radius_km: 11, // service area
+  radius_km: 16, // service area (includes Fiera Milano Rho)
 };
 
 export const GAZETTEER = [
@@ -33,6 +33,11 @@ export const GAZETTEER = [
   { name: 'Corso Vittorio Emanuele', lat: 45.4655, lng: 9.1935, aliases: ['vittorio emanuele', 'galleria'] },
   { name: 'Cadorna', lat: 45.468, lng: 9.1755, aliases: ['piazzale cadorna', 'castello sforzesco', 'castello'] },
   { name: 'Porta Ticinese', lat: 45.4555, lng: 9.181, aliases: ['colonne di san lorenzo', 'ticinese'] },
+  { name: 'Fiera Milano Rho', lat: 45.5215, lng: 9.0845, aliases: ['fiera di rho', 'fiera rho', 'rho fiera', 'fieramilano', 'rho'] },
+  { name: 'MiCo Milano Congressi', lat: 45.4779, lng: 9.1523, aliases: ['mico', 'fiera city', 'milano congressi', 'portello'] },
+  { name: 'Superstudio Più', lat: 45.4531, lng: 9.1631, aliases: ['superstudio'] },
+  { name: 'Bocconi', lat: 45.4505, lng: 9.1893, aliases: ['universita bocconi'] },
+  { name: 'Corso Garibaldi', lat: 45.4765, lng: 9.1838, aliases: [] },
 ];
 
 export function haversineKm(a, b) {

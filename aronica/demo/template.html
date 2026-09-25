@@ -36,7 +36,8 @@
     </div>
     <div class="pane-worker">
       <div class="phone"><div id="worker-root" class="w-host theme-dark"></div></div>
-      <div class="phone-cap">App Partner · Giulia R. è la n. 1 per i lavori vicino al Duomo</div>
+      <div class="phone-cap" id="phone-cap">App Partner · Giulia R. (tuttofare, Brera)</div>
+      <label class="phone-cap row" style="gap:6px"><input type="checkbox" id="follow" checked> Il telefono segue l'offerta n. 1</label>
     </div>
   </div>
 </section>
@@ -62,17 +63,17 @@
 <section class="view" id="view-about" hidden>
   <div class="about">
     <div>
-      <h1>Gli agenti AI assumono persone verificate per lavori fisici a Milano.</h1>
-      <p>Un agente (Claude, Grok, OpenAI…) crea un lavoro strutturato, negozia il prezzo in tempo reale con i supplier agent dei partner migliori, e un umano conferma con un tap. Da lì parte subito un'offerta a tempo alla persona con il punteggio più alto, con cascata automatica.</p>
+      <h1>Il pezzo fisico del flusso agentico: persone verificate, garantite, a Milano.</h1>
+      <p>L'assistente personale che ti organizza la settimana ("sistemare il giardino sabato") o l'agente acquisti di un'azienda ("4 facchini venerdì in Fiera") trasformano la richiesta in un incarico preciso a prezzo fisso. I supplier agent dei partner negoziano il quando; un umano conferma con un tap, oppure la policy aziendale approva da sola. Poi i posti si riempiono in parallelo, con il contratto giusto per ogni persona, e chi non si presenta viene sostituito in automatico.</p>
     </div>
     <div>
-      <h2>Prova il percorso completo in 2 minuti</h2>
+      <h2>Prova i due percorsi</h2>
       <ol>
-        <li><b>Live</b>, lato cliente: tocca l'esempio <i>Scaffale Esselunga</i>, poi <i>Trova persone</i>. Guarda la negoziazione A2A.</li>
-        <li>Tocca <i>Conferma</i> (Adesso o Programma).</li>
-        <li>Sul telefono arriva l'offerta a tempo per Giulia: <i>Accetto</i> → <i>Vado ora</i> → <i>Sono arrivato</i> → <i>Carica la prova</i> (foto dal tuo dispositivo + checklist).</li>
-        <li>Lato cliente vedi foto, verifica GPS e risposte. Valuta Giulia.</li>
-        <li>Prova anche <i>Capoeira</i>: fallisce in modo onesto. E la scheda <b>Agente AI</b>: lo stesso flusso via MCP.</li>
+        <li><b>Privato</b> (Live → Cliente): esempio <i>Giardino sabato</i> → <i>Prepara l'incarico</i> (parametri modificabili, prezzo fisso) → <i>Trova disponibilità</i>: i supplier agent rispondono sul quando → <i>Conferma</i>.</li>
+        <li>Il telefono segue l'offerta n. 1 (qui la squadra Verde Navigli): <i>Accetto</i> → <i>Parti ora</i> → <i>Sono arrivato</i> → foto e checklist.</li>
+        <li><b>Azienda</b> (switch in alto nel Buyer console): <i>4 facchini in fiera</i> → approvazione automatica sotto €600 → i 4 posti si riempiono in parallelo, ognuno con il suo contratto (PrestO, fattura, agenzia).</li>
+        <li>In <b>Ops</b>: <i>Simula no-show</i> su un facchino e guarda la sostituzione automatica; <i>Vai al prossimo lavoro</i> avanza l'orologio per vedere check-in, check-out e fattura.</li>
+        <li>Prova anche <i>Capoeira</i>: fallisce in modo onesto. E la scheda <b>Agente AI</b>: gli stessi flussi via MCP.</li>
       </ol>
     </div>
     <div>
@@ -82,7 +83,8 @@
     <div>
       <h2>Cosa è simulato</h2>
       <ul>
-        <li>I partner seed diversi da quello che controlli rispondono da soli secondo il loro tasso di accettazione, e inviano foto marcate <i>FOTO SIMULATA</i>.</li>
+        <li>I partner seed diversi da quello sul telefono rispondono da soli secondo il loro tasso di accettazione, partono in tempo per lo slot e inviano foto marcate <i>FOTO SIMULATA</i>.</li>
+        <li>Contratti (PrestO, prestazione occasionale, somministrazione) e fatture sono bozze: i limiti PrestO sono indicativi e vanno validati con un consulente del lavoro.</li>
         <li>Lo spostamento sulla mappa è simulato (accelerato 30×); la mappa è stilizzata.</li>
         <li>Pagamenti: escrow stub, nessun addebito reale. Verifica documenti: stub (in Ops).</li>
         <li>L'agente AI della demo è uno script senza LLM che usa gli stessi tool MCP.</li>
@@ -91,9 +93,10 @@
     <div>
       <h2>Regole di prodotto</h2>
       <ul>
-        <li>Solo verifiche sul campo: scaffali, foto punto vendita, prezzi, presenza, sopralluoghi, documenti, mystery shopping, installazioni.</li>
+        <li>Casa: giardinaggio, montaggio mobili, tuttofare, pulizie, attesa del tecnico, commissioni con acquisto. Aziende: facchinaggio e allestimento, staff eventi, turnover affitti brevi, sopralluoghi, verifiche punto vendita.</li>
+        <li>Prezzo fisso calcolato dalla piattaforma (con maggiorazioni esplicite per preavviso breve, domenica e sera): si negozia solo il quando.</li>
         <li>Fuori ambito, fuori Milano o nessun partner disponibile: <i>“Siamo spiacenti ma al momento non abbiamo persone sufficienti a soddisfare la richiesta.”</i></li>
-        <li>Punteggio stile Uber: ETA 35%, valutazione 25%, completamento 15%, esperienza 10%, prezzo 10%, accettazione 5%.</li>
+        <li>Punteggio stile Uber: vicinanza 25%, valutazione 25%, affidabilità 20%, esperienza nel servizio 15%, puntualità rispetto alla fascia 10%, accettazione 5%; solo partner liberi in calendario e disposti a lavorare a quella tariffa.</li>
         <li>Affidabilità: media delle ultime 100 valutazioni, avviso sotto ★4,6, sospensione sotto ★4,4, 80% di completamento o 3 mancate presenze.</li>
       </ul>
     </div>

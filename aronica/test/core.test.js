@@ -1,4 +1,4 @@
-import { test, before, beforeEach } from 'node:test';
+import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -7,251 +7,287 @@ import { join } from 'node:path';
 process.env.ARONICA_NEG_DELAY_MS = '0';
 process.env.ARONICA_UPLOADS = mkdtempSync(join(tmpdir(), 'aronica-up-'));
 
-const { openDb, get, update, setSetting, insert } = await import('../src/db.js');
-const { seed } = await import('../src/seed.js');
+const { openDb, get, all, update, setSetting, insert } = await import('../src/db.js');
+const { seed, CONSOLE_ACCOUNT, CONSOLE_BUSINESS_ACCOUNT } = await import('../src/seed.js');
 const { clock, NO_SUPPLY_IT, HttpError } = await import('../src/util.js');
-const { createJob } = await import('../src/jobs.js');
-const { rankCandidates } = await import('../src/matching.js');
-const { negotiateRound, acceptQuote, autoNegotiate, supplierPolicy } = await import('../src/negotiation.js');
-const { confirmJob, respondOffer, tick, startJob, arriveJob, submitProof, workerCancel } = await import('../src/dispatch.js');
+const { compileTask, classify } = await import('../src/compiler.js');
+const { createJob, rateWorker } = await import('../src/jobs.js');
+const { negotiateRound, acceptQuote, autoNegotiate } = await import('../src/negotiation.js');
+const { confirmJob, respondOffer, tick, startJob, arriveJob, submitProof, workerCancel, markNoShow } = await import('../src/dispatch.js');
 const { evaluate, enforce } = await import('../src/reliability.js');
-const { rateWorker } = await import('../src/jobs.js');
-const { classify } = await import('../src/skills.js');
+const { romeParts, romeTime } = await import('../src/time.js');
 
-const account = { id: 'acc_demo_agent', name: 'Test Agent' };
 const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+const consumer = () => get('SELECT * FROM accounts WHERE id = ?', CONSOLE_ACCOUNT);
+const business = () => get('SELECT * FROM accounts WHERE id = ?', CONSOLE_BUSINESS_ACCOUNT);
 
-function freshDb() {
+// Next weekday (Rome) at hh:mm, at least 2 days ahead so no short-notice surcharge.
+function nextDow(dow, h, m = 0) {
+  const p = romeParts(clock.now());
+  let add = ((dow - p.dow + 7) % 7) || 7;
+  if (add < 2) add += 7;
+  return romeTime(p.y, p.m, p.d + add, h, m);
+}
+const iso = (ms) => new Date(ms).toISOString();
+
+beforeEach(() => {
   clock.reset();
   openDb(':memory:');
   seed();
   setSetting('simulate_workers', false);
-}
-
-const shelfJob = (extra = {}) => createJob(account, {
-  title: 'Is Barilla pesto on shelf?',
-  location: { address: 'Corso Vittorio Emanuele' },
-  deadline_minutes: 120,
-  budget: { target_eur: 14, max_eur: 25 },
-  ...extra,
 });
 
-async function lockedDeal(extra) {
-  const { job } = shelfJob(extra);
-  const r = await autoNegotiate(job.id);
-  assert.ok(r.deal, 'auto negotiation should reach a deal');
-  return job.id;
-}
+function moveTo(workerId, job) { update('workers', workerId, { lat: job.lat + 0.0002, lng: job.lng }); }
 
-beforeEach(freshDb);
+// ---------------------------------------------------------------- compiler
+test('compiler: vague home request → structured, priced job with open questions', () => {
+  const c = compileTask({ text: 'devo sistemare il giardino sabato mattina, sono circa 80 mq con la siepe, zona Navigli' });
+  assert.equal(c.service.code, 'giardinaggio');
+  assert.equal(c.params.area_m2, 80);
+  assert.equal(c.params.siepi, true);
+  assert.equal(romeParts(Date.parse(c.window.start)).dow, 6);
+  assert.equal(romeParts(Date.parse(c.window.start)).h, 8);
+  assert.equal(c.window.flexible, true);
+  assert.equal(c.location.address, 'Navigli');
+  assert.ok(c.price.total_cents > 5000);
+  assert.ok(c.price.lines.some((l) => l.label === 'Siepi'));
+  assert.equal(c.ready, true);
+});
 
-test('classifier maps field-proof tasks and fails closed on lifestyle services', () => {
-  assert.equal(classify('Is this shelf real? check the planogram').skill, 'shelf_check');
-  assert.equal(classify('photo the store front and the insegna').skill, 'store_photo');
-  assert.equal(classify('be there at 12 and wait for the courier').skill, 'presence');
-  for (const t of ['Find me a Capoeira teacher', 'book nails', 'I need a dentist near Duomo']) {
-    const c = classify(t);
-    assert.ok(!c || !c.skill, `${t} should not classify`);
+test('compiler: business shift → headcount, exact window, per-person pricing', () => {
+  const c = compileTask({ text: 'Servono 4 facchini venerdì 7-12 alla Fiera di Rho per allestimento stand' });
+  assert.equal(c.service.code, 'facchinaggio_allestimento');
+  assert.equal(c.headcount, 4);
+  assert.equal(c.duration_min, 300);
+  assert.equal(c.window.flexible, false);
+  assert.equal(romeParts(Date.parse(c.window.start)).h, 7);
+  assert.equal(c.location.address, 'Fiera Milano Rho');
+  assert.equal(c.price.seats, 4);
+  assert.equal(c.price.seat_payout_cents * 4 <= c.price.payout_total_cents, true);
+});
+
+test('compiler: errands need a spending cap; out-of-scope fails closed', () => {
+  const c = compileTask({ text: 'comprarmi un jeans 501 taglia 32 da Levi\'s in Corso Vittorio Emanuele entro le 19, max 120 euro' });
+  assert.equal(c.service.code, 'commissione_acquisto');
+  assert.equal(c.params.spesa_max_eur, 120);
+  assert.match(c.params.articolo, /jeans/);
+  assert.equal(c.price.hold_cents, 12000);
+  const noCap = compileTask({ text: 'comprami un regalo in Brera domani' });
+  assert.equal(noCap.ready, false);
+  assert.ok(noCap.questions.some((q) => q.key === 'spesa_max_eur' && q.blocking));
+  for (const t of ['Trovami un insegnante di Capoeira ai Navigli', 'prenota le unghie', 'mi serve un idraulico per la caldaia']) {
+    assert.throws(() => compileTask({ text: t }), (e) => e instanceof HttpError && e.message === NO_SUPPLY_IT && e.code === 'unsupported_task');
   }
+  // …but waiting at home FOR the plumber is in scope
+  assert.equal(classify('aspettare l\'idraulico a casa domani 9-13').service.code, 'attesa_in_casa');
 });
 
-test('create_job fails closed with the honest message for unsupported tasks, cities, skills', () => {
-  const cases = [
-    [{ title: 'Capoeira teacher tonight', location: { address: 'Navigli' } }, 'unsupported_task'],
-    [{ title: 'Shelf check', city: 'Roma', location: { lat: 41.9, lng: 12.5 } }, 'unsupported_city'],
-    [{ title: 'Nails', skill: 'nails', location: { address: 'Brera' } }, 'unsupported_skill'],
-    [{ title: 'Shelf check', location: { lat: 45.7, lng: 9.6 } }, 'outside_service_area'],
-  ];
-  for (const [input, code] of cases) {
-    assert.throws(() => createJob(account, input), (e) => e instanceof HttpError && e.code === code && e.message === NO_SUPPLY_IT);
-  }
+test('pricing: fixed price with explicit short-notice surcharge', () => {
+  const soon = compileTask({ service: 'montaggio_mobili', params: { pezzi: 2 }, location: { address: 'Brera' }, window: { start: iso(clock.now() + 2 * 3600000), end: iso(clock.now() + 6 * 3600000) } });
+  const later = compileTask({ service: 'montaggio_mobili', params: { pezzi: 2 }, location: { address: 'Brera' }, window: { start: iso(nextDow(3, 9)), end: iso(nextDow(3, 18)) } });
+  assert.ok(soon.price.surcharges.some((s) => s.pct === 30));
+  assert.equal(later.price.surcharges.length, 0);
+  assert.ok(soon.price.total_cents > later.price.total_cents);
 });
 
-test('no available workers → no_supply with honest message', () => {
-  update('workers', 'b_rilievi', { online: 0 });
-  update('workers', 'b_fotopunto', { online: 0 });
-  update('workers', 'w_sara', { online: 0 });
-  update('workers', 'w_luca', { online: 0 });
-  assert.throws(
-    () => createJob(account, { title: 'Sopralluogo appartamento in affitto', location: { address: 'Navigli' } }),
-    (e) => e.code === 'no_supply' && e.message === NO_SUPPLY_IT && !!e.extra.job_id,
-  );
+// ---------------------------------------------------------------- consumer flow
+test('consumer: gardener Saturday → A2A slot negotiation → human confirm → offer to the best partner', async () => {
+  const { job } = createJob(consumer(), { text: 'sistemare il giardino 80 mq con siepe', location: { address: 'Navigli' }, window: { start: iso(nextDow(6, 8)), end: iso(nextDow(6, 13)) } });
+  assert.equal(job.status, 'scheduling');
+  const round = await negotiateRound(job.id);
+  assert.ok(round.responses.length >= 2);
+  const verde = round.responses.find((r) => r.worker_ref === 'b_verde');
+  assert.equal(verde.action, 'accept');
+  const paolo = round.responses.find((r) => r.worker_ref === 'w_paolo');
+  assert.ok(paolo, 'weekend-only gardener is asked too');
+  const r = acceptQuote(job.id, round.best_accept.quote_id);
+  assert.equal(r.auto_approved, false);
+  assert.equal(get('SELECT status FROM jobs WHERE id = ?', job.id).status, 'pending_confirmation');
+  confirmJob(job.id, { by: 'human' });
+  const offer = get("SELECT * FROM offers WHERE job_id = ? AND status = 'pending'", job.id);
+  assert.equal(offer.worker_id, round.best_accept.worker_ref);
+  const res = respondOffer(offer.worker_id, offer.id, true);
+  assert.match(res.contract, /Fattura|occasionale/);
+  assert.equal(get('SELECT status FROM jobs WHERE id = ?', job.id).status, 'assigned');
 });
 
-test('ranking: Giulia is the clear #1 near the Duomo; suspended / unverified / offline excluded', () => {
-  const { job } = shelfJob();
-  const { eligible, excluded } = rankCandidates({ ...job, lat: job.location.lat, lng: job.location.lng, deadline_at: Date.parse(job.deadline_at), budget_max_cents: 2500 });
-  assert.equal(eligible[0].worker.id, 'w_giulia');
-  assert.ok(eligible[0].score - eligible[1].score > 3);
-  const reasons = Object.fromEntries(excluded.map((e) => [e.worker_id, e.reasons]));
-  assert.ok(reasons.w_francesca.includes('suspended'));
-  assert.ok(reasons.w_chiara.includes('not_verified'));
-  assert.ok(reasons.w_paolo.includes('offline'));
-  // warning tier ranks below comparable good workers
-  const davide = eligible.find((c) => c.worker.id === 'w_davide');
-  assert.equal(davide.worker.tier, 'warning');
-  assert.ok(davide.score < eligible.find((c) => c.worker.id === 'w_marco').score);
+test('consumer: nobody free in the window → supplier agents counter-propose another slot', async () => {
+  // Only weekend gardener Paolo + Verde (Mon–Sat). Ask for a Sunday: Verde counters.
+  const { job } = createJob(consumer(), { text: 'taglio prato 60 mq', location: { address: 'Bicocca' }, window: { start: iso(nextDow(0, 18)), end: iso(nextDow(0, 20)) } });
+  const res = await autoNegotiate(job.id);
+  assert.equal(res.deal, null);
+  assert.ok(res.counters.length >= 1);
+  const c = res.counters[0];
+  const r = acceptQuote(job.id, c.quote_id);
+  assert.equal(r.deal.slot_start, Date.parse(c.slot_start));
+  assert.equal(get('SELECT window_start FROM jobs WHERE id = ?', job.id).window_start, Date.parse(c.slot_start));
 });
 
-test('supplier policy: counters, concedes toward floor, accepts at/above threshold, walks away late', () => {
-  const c = { floor_cents: 1500, breakdown: { rating: 1 }, worker: { display_name: 'X', vehicle: 'bike' }, distance_km: 1, eta_min: 5 };
-  const skill = { name_it: 'Verifica scaffale' };
-  const r1 = supplierPolicy(c, skill, 1000, 1, null);
-  assert.equal(r1.action, 'counter');
-  assert.ok(r1.price_cents > 1500);
-  const r2 = supplierPolicy(c, skill, 1200, 2, r1.price_cents);
-  assert.equal(r2.action, 'counter');
-  assert.ok(r2.price_cents < r1.price_cents && r2.price_cents >= 1500);
-  assert.equal(supplierPolicy(c, skill, 1500, 3, r2.price_cents).action, 'accept');
-  assert.equal(supplierPolicy(c, skill, 1000, 6, 1500).action, 'reject');
-});
-
-test('negotiation is persisted on the job and deal pool is ranked by score', async () => {
-  const { job } = shelfJob();
-  const r1 = await negotiateRound(job.id, 1200);
-  assert.equal(r1.round, 1);
-  assert.equal(r1.responses.length, 5);
-  assert.ok(r1.responses.every((r) => r.action === 'counter'));
-  const r2 = await negotiateRound(job.id, 2100);
-  assert.ok(r2.best_accept);
-  const deal = acceptQuote(job.id, r2.best_accept.quote_id);
-  assert.equal(deal.price_cents, 2100);
-  assert.equal(deal.lead.worker_ref, 'w_giulia');
-  const stored = get('SELECT * FROM jobs WHERE id = ?', job.id);
-  assert.equal(stored.status, 'pending_confirmation');
-  assert.equal(stored.deal.price_cents, 2100);
-  assert.ok(get('SELECT COUNT(*) AS c FROM quotes WHERE job_id = ?', job.id).c >= 10);
-  await assert.rejects(negotiateRound(job.id, 2000), (e) => e.code === 'not_negotiating');
-});
-
-test('built-in buyer agent stays within max and lands the top-ranked worker', async () => {
-  const id = await lockedDeal();
-  const job = get('SELECT * FROM jobs WHERE id = ?', id);
-  assert.ok(job.deal.price_cents <= 2500);
-  assert.equal(job.deal.pool[0], 'w_giulia');
-});
-
-test('confirm → offer to #1 → accept claims the job and cancels the rest', async () => {
-  const id = await lockedDeal();
-  confirmJob(id, { mode: 'now' });
-  const job = get('SELECT * FROM jobs WHERE id = ?', id);
-  assert.equal(job.status, 'dispatching');
-  assert.equal(job.escrow.status, 'held');
-  const offer = get("SELECT * FROM offers WHERE job_id = ? AND status = 'pending'", id);
-  assert.equal(offer.worker_id, 'w_giulia');
-  assert.equal(offer.rank, 1);
-  respondOffer('w_giulia', offer.id, true);
-  const after = get('SELECT * FROM jobs WHERE id = ?', id);
-  assert.equal(after.status, 'assigned');
-  assert.equal(after.assigned_worker_id, 'w_giulia');
-  assert.equal(get("SELECT COUNT(*) AS c FROM offers WHERE job_id = ? AND status = 'pending'", id).c, 0);
-  assert.throws(() => respondOffer('w_giulia', offer.id, true), (e) => e.code === 'offer_not_pending');
-});
-
-test('cascade: expired and declined offers move to the next worker; exhausted pool → no_match honestly', async () => {
-  const id = await lockedDeal();
-  confirmJob(id, { mode: 'now' });
-  const pool = get('SELECT dispatch_pool FROM jobs WHERE id = ?', id).dispatch_pool;
-  assert.ok(pool.length >= 2);
-  // #1 ignores it: TTL passes, the loop expires it and offers #2
-  clock.freeze(Date.now());
-  clock.advance(21_000);
-  tick();
-  const offers = () => get("SELECT * FROM offers WHERE job_id = ? AND status = 'pending'", id);
-  assert.equal(get("SELECT status FROM offers WHERE job_id = ? AND worker_id = 'w_giulia'", id).status, 'expired');
-  assert.equal(offers().worker_id, pool[1]);
-  assert.equal(offers().rank, 2);
-  // everyone else declines
-  let o;
-  while ((o = offers())) respondOffer(o.worker_id, o.id, false);
-  const job = get('SELECT * FROM jobs WHERE id = ?', id);
-  assert.equal(job.status, 'no_match');
-  assert.equal(job.status_message, NO_SUPPLY_IT);
-  assert.equal(job.escrow.status, 'refunded');
-  const g = get("SELECT * FROM workers WHERE id = 'w_giulia'");
-  assert.equal(g.offers_expired, 1 + Math.round((340 - 327) * 0.4));
-});
-
-test('schedule mode assigns ahead of time and extends the deadline window', async () => {
-  const id = await lockedDeal();
-  const at = new Date(Date.now() + 4 * 3600_000).toISOString();
-  confirmJob(id, { mode: 'schedule', scheduled_at: at });
-  const job = get('SELECT * FROM jobs WHERE id = ?', id);
-  assert.equal(job.mode, 'schedule');
-  assert.ok(job.deadline_at > Date.parse(at));
-  const offer = get("SELECT * FROM offers WHERE job_id = ? AND status = 'pending'", id);
-  respondOffer(offer.worker_id, offer.id, true);
-  assert.equal(get('SELECT status FROM jobs WHERE id = ?', id).status, 'assigned');
-});
-
-test('proof is validated (photos, GPS geofence, checklist) before Done; escrow released', async () => {
-  const id = await lockedDeal();
-  confirmJob(id, { mode: 'now' });
-  const offer = get("SELECT * FROM offers WHERE job_id = ? AND status = 'pending'", id);
-  respondOffer('w_giulia', offer.id, true);
-  startJob('w_giulia', id);
-  assert.throws(() => arriveJob('w_giulia', id), (e) => e.code === 'not_on_site');
-  const job = get('SELECT * FROM jobs WHERE id = ?', id);
-  update('workers', 'w_giulia', { lat: job.lat + 0.0003, lng: job.lng });
-  arriveJob('w_giulia', id);
-  assert.throws(() => submitProof('w_giulia', id, { photos: [PNG], answers: {} }), (e) => e.code === 'proof_rejected' && e.extra.problems.length >= 2);
-  const r = submitProof('w_giulia', id, { photos: [PNG, PNG, PNG], answers: { on_shelf: 'yes', facings: '4' } });
-  assert.equal(r.proof.photos.length, 3);
-  const done = get('SELECT * FROM jobs WHERE id = ?', id);
+test('consumer: purchase errand end-to-end with receipt under the cap, escrow releases the reimbursement', async () => {
+  const { job } = createJob(consumer(), { text: 'comprarmi un jeans da Levi\'s max 120 euro', location: { address: 'Corso Vittorio Emanuele' }, window: { start: iso(nextDow(2, 10)), end: iso(nextDow(2, 19)) } });
+  const res = await autoNegotiate(job.id);
+  assert.ok(res.deal);
+  confirmJob(job.id);
+  const j0 = get('SELECT * FROM jobs WHERE id = ?', job.id);
+  assert.equal(j0.escrow.amount_cents, j0.price.total_cents + 12000);
+  const o = get("SELECT * FROM offers WHERE job_id = ? AND status = 'pending'", job.id);
+  respondOffer(o.worker_id, o.id, true);
+  startJob(o.worker_id, job.id);
+  moveTo(o.worker_id, j0);
+  arriveJob(o.worker_id, job.id);
+  assert.throws(() => submitProof(o.worker_id, job.id, { photos: [PNG, PNG], answers: { bought: 'yes', spesa_eur: 150 } }), (e) => e.code === 'proof_rejected');
+  submitProof(o.worker_id, job.id, { photos: [PNG, PNG], answers: { bought: 'yes', spesa_eur: 99.9 } });
+  const done = get('SELECT * FROM jobs WHERE id = ?', job.id);
   assert.equal(done.status, 'done');
-  assert.equal(done.escrow.status, 'released');
-  assert.equal(done.proof.answers.facings, 4);
-  const res = rateWorker(id, { stars: 5, tags: ['foto_nitide'] });
-  assert.equal(res.stars, 5);
-  assert.throws(() => rateWorker(id, { stars: 4 }), (e) => e.code === 'already_rated');
+  assert.equal(done.escrow.purchase_reimbursed_cents, 9990);
+  assert.equal(done.invoice, null); // consumers get a receipt, not an invoice
+  assert.equal(rateWorker(job.id, { stars: 5, tags: ['puntuale'] }).stars, 5);
 });
 
-test('worker cancel after accepting re-enters the cascade and counts against them', async () => {
-  const id = await lockedDeal();
-  confirmJob(id, { mode: 'now' });
-  const offer = get("SELECT * FROM offers WHERE job_id = ? AND status = 'pending'", id);
-  respondOffer('w_giulia', offer.id, true);
-  workerCancel('w_giulia', id);
-  const job = get('SELECT * FROM jobs WHERE id = ?', id);
-  assert.equal(job.status, 'dispatching');
-  const next = get("SELECT * FROM offers WHERE job_id = ? AND status = 'pending'", id);
-  assert.notEqual(next.worker_id, 'w_giulia');
-  assert.equal(get("SELECT jobs_cancelled FROM workers WHERE id = 'w_giulia'").jobs_cancelled, 3);
+// ---------------------------------------------------------------- business flow
+test('business: 4 facchini → auto-approved by policy → parallel offers, agency crew covers several seats', async () => {
+  const { job } = createJob(business(), { text: '4 facchini per allestimento stand', location: { address: 'Fiera Milano Rho' }, window: { start: iso(nextDow(5, 7)), end: iso(nextDow(5, 12)) } });
+  assert.equal(job.headcount, 4);
+  const res = await autoNegotiate(job.id);
+  assert.ok(res.deal);
+  assert.equal(res.auto_approved, true);
+  const j = get('SELECT * FROM jobs WHERE id = ?', job.id);
+  assert.equal(j.status, 'dispatching');
+  assert.equal(j.approval.by, 'policy');
+  const pending = all("SELECT * FROM offers WHERE job_id = ? AND status = 'pending'", job.id);
+  assert.equal(pending.reduce((a, o) => a + o.seats, 0), 4, 'one timed offer per open seat');
+  // accept all pending offers
+  for (const o of pending) respondOffer(o.worker_id, o.id, true);
+  const after = get('SELECT * FROM jobs WHERE id = ?', job.id);
+  assert.equal(after.seats_filled, 4);
+  assert.equal(after.status, 'assigned');
+  const as = all('SELECT * FROM assignments WHERE job_id = ?', job.id);
+  assert.ok(as.every((a) => a.crew <= 2), 'concentration limit: no supplier covers more than half of a 4-person shift');
+  assert.ok(as.some((a) => a.contract.route === 'fattura_b2b') || as.every((a) => a.contract.route === 'presto'));
+  assert.ok(as.filter((a) => a.contract.route === 'presto').every((a) => a.contract.checks.length === 4));
 });
 
-test('reliability: seed tiers, excluded ratings, warning → suspension', () => {
-  assert.equal(get("SELECT tier FROM workers WHERE id = 'w_giulia'").tier, 'good');
-  assert.equal(get("SELECT tier FROM workers WHERE id = 'w_davide'").tier, 'warning');
-  const f = get("SELECT * FROM workers WHERE id = 'w_francesca'");
-  assert.equal(f.status, 'suspended');
-  assert.equal(f.online, 0);
-  // new worker: 3 ratings is not enough to be judged on rating
-  assert.equal(evaluate(get("SELECT * FROM workers WHERE id = 'w_elena'")).tier, 'good');
-  // Tommaso gets a streak of 1-star reviews → warning then suspension
-  for (let i = 0; i < 40; i++) {
-    insert('ratings', { id: `bad_${i}`, job_id: `j${i}`, worker_id: 'w_tommaso', stars: 1, tags: [], excluded: 0, created_at: Date.now() + i });
-  }
-  enforce('w_tommaso');
-  const t = get("SELECT * FROM workers WHERE id = 'w_tommaso'");
-  assert.equal(t.status, 'suspended');
-  assert.ok(t.tier_reasons[0].includes('Valutazione'));
-  // excluded ratings do not count
-  for (let i = 0; i < 40; i++) {
-    insert('ratings', { id: `ex_${i}`, job_id: `k${i}`, worker_id: 'w_marco', stars: 1, tags: ['luogo_chiuso_o_inaccessibile'], excluded: 1, created_at: Date.now() + i });
-  }
-  assert.equal(enforce('w_marco').tier, 'good');
+test('business: above the policy threshold a human must approve', async () => {
+  const { job } = createJob(business(), { text: '12 hostess per congresso', location: { address: 'MiCo' }, window: { start: iso(nextDow(4, 8)), end: iso(nextDow(4, 18)) } });
+  const res = await autoNegotiate(job.id);
+  assert.ok(res.deal);
+  assert.equal(res.auto_approved, false);
+  assert.equal(get('SELECT status FROM jobs WHERE id = ?', job.id).status, 'pending_confirmation');
 });
 
-test('deadline passing on an assigned job → expired, refund, no-show recorded', async () => {
-  const id = await lockedDeal();
-  confirmJob(id, { mode: 'now' });
-  const offer = get("SELECT * FROM offers WHERE job_id = ? AND status = 'pending'", id);
-  respondOffer('w_giulia', offer.id, true);
+test('compliance: PrestO caps exceeded → somministrazione via partner agency', async () => {
+  // Pre-load Marco with PrestO earnings close to the per-worker cap.
+  insert('jobs', { id: 'job_old', account_id: 'acc_other', city: 'milano', service: 'staff_eventi', title: 'old', params: {}, instructions: [], proof_req: { kind: 'timesheet' }, lat: 45.46, lng: 9.19, window_start: clock.now(), window_end: clock.now(), duration_min: 60, headcount: 1, price: {}, status: 'done', confirm_token: 'x', created_at: clock.now(), updated_at: clock.now() });
+  insert('assignments', { id: 'as_old', job_id: 'job_old', worker_id: 'w_marco', crew: 1, status: 'done', contract: { route: 'presto' }, payout_cents: 498000, assigned_at: clock.now() });
+  const { job } = createJob(business(), { text: '1 steward', service: 'staff_eventi', params: { persone: 1, ruolo: 'steward' }, location: { address: 'Porta Venezia' }, window: { start: iso(nextDow(3, 9)), end: iso(nextDow(3, 13)) } });
+  await negotiateRound(job.id);
+  const q = get("SELECT * FROM quotes WHERE job_id = ? AND worker_id = 'w_marco' AND action = 'accept'", job.id);
+  assert.ok(q, 'Marco available');
+  acceptQuote(job.id, q.id);
+  if (get('SELECT status FROM jobs WHERE id = ?', job.id).status === 'pending_confirmation') confirmJob(job.id);
+  const o = get("SELECT * FROM offers WHERE job_id = ? AND worker_id = 'w_marco' AND status = 'pending'", job.id);
+  respondOffer('w_marco', o.id, true);
+  const a = get("SELECT * FROM assignments WHERE job_id = ? AND worker_id = 'w_marco'", job.id);
+  assert.equal(a.contract.route, 'somministrazione');
+  assert.ok(a.contract.checks.some((c) => !c.ok));
+});
+
+test('guarantee: no-show is detected and the seat is re-dispatched automatically', async () => {
+  const { job } = createJob(business(), { text: '2 steward', service: 'staff_eventi', params: { persone: 2, ruolo: 'steward' }, location: { address: 'MiCo' }, window: { start: iso(nextDow(3, 9)), end: iso(nextDow(3, 13)) } });
+  await autoNegotiate(job.id);
+  if (get('SELECT status FROM jobs WHERE id = ?', job.id).status === 'pending_confirmation') confirmJob(job.id);
+  for (const o of all("SELECT * FROM offers WHERE job_id = ? AND status = 'pending'", job.id)) respondOffer(o.worker_id, o.id, true);
+  const first = all("SELECT * FROM assignments WHERE job_id = ? AND status = 'assigned'", job.id);
+  assert.ok(first.length >= 1);
+  const j = get('SELECT * FROM jobs WHERE id = ?', job.id);
+  // Jump to 25 minutes after the start: nobody left → no-show → replacement offers go out.
   clock.freeze(Date.now());
-  clock.advance(3 * 3600_000);
+  clock.advance(j.slot_start + 25 * 60000 - clock.now());
   tick();
-  const job = get('SELECT * FROM jobs WHERE id = ?', id);
-  assert.equal(job.status, 'expired');
-  assert.equal(job.escrow.status, 'refunded');
-  assert.equal(get("SELECT no_shows FROM workers WHERE id = 'w_giulia'").no_shows, 1);
+  const ns = all("SELECT * FROM assignments WHERE job_id = ? AND status = 'no_show'", job.id);
+  assert.ok(ns.length >= 1);
+  const w = get('SELECT no_shows FROM workers WHERE id = ?', ns[0].worker_id);
+  assert.ok(w.no_shows >= 1);
+  const after = get('SELECT * FROM jobs WHERE id = ?', job.id);
+  assert.equal(after.status, 'dispatching');
+  assert.ok(get("SELECT COUNT(*) AS c FROM offers WHERE job_id = ? AND status = 'pending'", job.id).c >= 1);
+  assert.ok(get("SELECT COUNT(*) AS c FROM events WHERE job_id = ? AND type = 'dispatch.replacement'", job.id).c >= 1);
+});
+
+test('timesheet: check-in / check-out, job done, invoice drafted for the company', async () => {
+  const { job } = createJob(business(), { text: '1 hostess', service: 'staff_eventi', params: { persone: 1 }, location: { address: 'MiCo' }, window: { start: iso(nextDow(3, 9)), end: iso(nextDow(3, 13)) } });
+  await autoNegotiate(job.id);
+  if (get('SELECT status FROM jobs WHERE id = ?', job.id).status === 'pending_confirmation') confirmJob(job.id);
+  const o = get("SELECT * FROM offers WHERE job_id = ? AND status = 'pending'", job.id);
+  respondOffer(o.worker_id, o.id, true);
+  const j = get('SELECT * FROM jobs WHERE id = ?', job.id);
+  startJob(o.worker_id, job.id);
+  moveTo(o.worker_id, j);
+  clock.freeze(j.slot_start - 5 * 60000);
+  arriveJob(o.worker_id, job.id);
+  clock.freeze(j.slot_start + j.duration_min * 60000);
+  submitProof(o.worker_id, job.id, { answers: { notes: 'ok' } });
+  const done = get('SELECT * FROM jobs WHERE id = ?', job.id);
+  assert.equal(done.status, 'done');
+  const a = get('SELECT * FROM assignments WHERE job_id = ?', job.id);
+  assert.equal(a.proof.timesheet.minutes_worked, j.duration_min + 5);
+  assert.match(done.invoice.number, /^AR-\d{4}-\d{4}$/);
+  assert.equal(done.invoice.iva_cents, Math.round(done.invoice.imponibile_cents * 0.22));
+});
+
+test('partial coverage is reported honestly, with a proportional refund', async () => {
+  // Offline everyone but two people who do staff_eventi on that day.
+  for (const w of all('SELECT id FROM workers')) if (!['w_sara', 'w_nadia'].includes(w.id)) update('workers', w.id, { status: 'suspended' });
+  const { job } = createJob(business(), { text: '5 hostess', service: 'staff_eventi', params: { persone: 5 }, location: { address: 'MiCo' }, window: { start: iso(nextDow(3, 9)), end: iso(nextDow(3, 13)) } });
+  const r = await autoNegotiate(job.id);
+  assert.equal(r.deal.seats_available, 2);
+  if (get('SELECT status FROM jobs WHERE id = ?', job.id).status === 'pending_confirmation') confirmJob(job.id);
+  for (const o of all("SELECT * FROM offers WHERE job_id = ? AND status = 'pending'", job.id)) respondOffer(o.worker_id, o.id, true);
+  const j = get('SELECT * FROM jobs WHERE id = ?', job.id);
+  assert.equal(j.seats_filled, 2);
+  assert.equal(j.status, 'assigned');
+  assert.match(j.status_message, /Coperti 2 posti su 5/);
+  assert.ok(j.escrow.partial_refund_cents > 0);
+});
+
+test('partner cancels after accepting: seat goes back into the cascade, counts against them', async () => {
+  const { job } = createJob(consumer(), { text: 'montare 2 mobili ikea', location: { address: 'Brera' }, window: { start: iso(nextDow(2, 9)), end: iso(nextDow(2, 18)) } });
+  await autoNegotiate(job.id);
+  confirmJob(job.id);
+  const o = get("SELECT * FROM offers WHERE job_id = ? AND status = 'pending'", job.id);
+  respondOffer(o.worker_id, o.id, true);
+  const before = get('SELECT jobs_cancelled FROM workers WHERE id = ?', o.worker_id).jobs_cancelled;
+  workerCancel(o.worker_id, job.id);
+  assert.equal(get('SELECT jobs_cancelled FROM workers WHERE id = ?', o.worker_id).jobs_cancelled, before + 1);
+  assert.equal(get('SELECT status FROM jobs WHERE id = ?', job.id).status, 'dispatching');
+  const next = get("SELECT * FROM offers WHERE job_id = ? AND status = 'pending'", job.id);
+  assert.ok(next && next.worker_id !== o.worker_id);
+});
+
+test('cascade: an unanswered offer expires and moves to the next partner', async () => {
+  const { job } = createJob(consumer(), { text: 'montare 1 libreria', location: { address: 'Brera' }, window: { start: iso(nextDow(2, 9)), end: iso(nextDow(2, 18)) } });
+  await autoNegotiate(job.id);
+  confirmJob(job.id);
+  const first = get("SELECT * FROM offers WHERE job_id = ? AND status = 'pending'", job.id);
+  clock.freeze(Date.now());
+  clock.advance(21000);
+  tick();
+  assert.equal(get('SELECT status FROM offers WHERE id = ?', first.id).status, 'expired');
+  const next = get("SELECT * FROM offers WHERE job_id = ? AND status = 'pending'", job.id);
+  assert.ok(next && next.rank > first.rank);
+});
+
+test('reliability tiers still enforced; suspended partners are never dispatched', () => {
+  assert.equal(get("SELECT status FROM workers WHERE id = 'w_francesca'").status, 'suspended');
+  assert.equal(get("SELECT tier FROM workers WHERE id = 'w_davide'").tier, 'warning');
+  assert.equal(evaluate(get("SELECT * FROM workers WHERE id = 'w_elena'")).tier, 'good');
+  for (let i = 0; i < 40; i++) insert('ratings', { id: `bad_${i}`, job_id: `j${i}`, worker_id: 'w_tommaso', stars: 1, tags: [], excluded: 0, created_at: Date.now() + i });
+  enforce('w_tommaso');
+  assert.equal(get("SELECT status FROM workers WHERE id = 'w_tommaso'").status, 'suspended');
+});
+
+test('no supply at all → honest no_supply', () => {
+  for (const w of all('SELECT id FROM workers')) update('workers', w.id, { status: 'suspended' });
+  assert.throws(() => createJob(consumer(), { text: 'pulizia casa 60 mq', location: { address: 'Brera' }, window: { start: iso(nextDow(2, 9)), end: iso(nextDow(2, 18)) } }),
+    (e) => e.code === 'no_supply' && e.message === NO_SUPPLY_IT);
 });

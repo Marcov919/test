@@ -28,7 +28,7 @@ export const THRESHOLDS = {
   min_jobs_for_suspension: 10,
   warn_cancel_rate: 0.05,
   suspend_no_shows: 3,
-  high_value_cents: 5000, // warning-tier workers don't get jobs above this
+  high_value_cents: 15000, // warning-tier workers don't get jobs above this
 };
 
 // Tags a buyer can attach to a rating. `excluded` = not the worker's fault.
@@ -60,7 +60,7 @@ export function ratingStats(workerId) {
 
 export function metrics(w) {
   const active = get(
-    "SELECT COUNT(*) AS c FROM jobs WHERE assigned_worker_id = ? AND status IN ('assigned','en_route','on_site')", w.id,
+    "SELECT COUNT(*) AS c FROM assignments WHERE worker_id = ? AND status IN ('assigned','en_route','on_site')", w.id,
   ).c;
   const closed = Math.max(0, w.jobs_accepted - active);
   const completion = closed ? w.jobs_completed / closed : 1;

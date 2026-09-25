@@ -1,238 +1,210 @@
-// Live A2A negotiation. The Buyer Agent (external Claude/Grok/OpenAI agent, or
-// Aronica's built-in buyer agent) exchanges offers with Supplier Agents, one per
-// top-ranked worker. Supplier agents run server-side (v1), each with a private
-// policy derived from its worker: a price floor (base × worker rate × urgency ×
-// distance) and a concession curve. Every step is persisted and streamed.
+// A2A negotiation v2 — on WHEN, not on price.
+// The price is fixed by the platform. The buyer agent proposes a time window;
+// each supplier agent (one per top-ranked partner, server-side in v1) checks its
+// partner's calendar and replies: accept (with a start time), counter (another
+// slot outside the window), or decline (booked / pay below the partner's
+// minimum). The chosen quote locks the slot; approval is a human tap or, for
+// business accounts, an automatic policy.
 import { get, insert, update, all } from './db.js';
 import { emit } from './events.js';
-import { rankCandidates } from './matching.js';
-import { getSkill } from './skills.js';
-import { VEHICLES } from './geo.js';
-import { HttpError, clock, id, round50, eur, sleep, NO_SUPPLY_IT } from './util.js';
+import { rankCandidates, nextAvailability, freeCapacity, maxSeatsPerSupplier } from './matching.js';
+import { getService } from './services.js';
+import { quote as priceQuote } from './pricing.js';
+import { haversineKm } from './geo.js';
+import { slotLabel, durationLabel } from './time.js';
+import { confirmJob } from './dispatch.js';
+import { HttpError, clock, id, eur, sleep, NO_SUPPLY_IT } from './util.js';
 
-export const PARTICIPANTS = 5;
-export const MAX_ROUNDS = 8;
-export const DEAL_VALID_MS = 10 * 60 * 1000;
-export const PLATFORM_FEE = 0.15;
+export const MAX_ROUNDS = 6;
+const busy = new Set();
 
-const busy = new Set(); // job ids with a round in flight
-
-function negotiationDelay() {
+function delay() {
   const base = Number(process.env.ARONICA_NEG_DELAY_MS ?? 800);
   return base ? base * (0.5 + Math.random()) : 0;
 }
 
-export function openingAsk(c) {
-  return round50(c.floor_cents * (1.2 + 0.15 * c.breakdown.rating));
-}
-
-// Pure supplier-agent policy. Returns { action, price_cents, message }.
-export function supplierPolicy(c, skill, buyerOffer, round, lastAsk) {
-  const floor = c.floor_cents;
-  const ask = lastAsk ?? openingAsk(c);
-  const alias = c.worker.display_name;
-  const vehicle = VEHICLES[c.worker.vehicle]?.label_it.toLowerCase() ?? c.worker.vehicle;
-  const closeEnough = floor + (ask - floor) * 0.3;
-  if (buyerOffer >= ask || buyerOffer >= closeEnough || (round >= 3 && buyerOffer >= floor)) {
-    return {
-      action: 'accept',
-      price_cents: buyerOffer,
-      message: `Accetto ${eur(buyerOffer)}. Sono a ${c.distance_km.toFixed(1)} km, arrivo in ${c.eta_min} min (${vehicle}).`,
-    };
-  }
-  if (round >= 6) {
-    return { action: 'reject', price_cents: floor, message: `Non posso scendere sotto ${eur(floor)}. Passo.` };
-  }
-  if (lastAsk == null) {
-    const low = buyerOffer < floor * 0.7;
-    return {
-      action: 'counter',
-      price_cents: ask,
-      message: low
-        ? `${eur(buyerOffer)} è troppo basso per ${c.distance_km.toFixed(1)} km. Posso farlo a ${eur(ask)}, arrivo in ${c.eta_min} min.`
-        : `Posso esserci in ${c.eta_min} min (${vehicle}). Per ${skill.name_it.toLowerCase()} chiedo ${eur(ask)}.`,
-    };
-  }
-  let next = Math.max(floor, round50(ask - (ask - Math.max(buyerOffer, floor)) * 0.4));
-  if (next >= ask && ask > floor) next = Math.max(floor, ask - 50);
-  return {
-    action: 'counter',
-    price_cents: next,
-    message: next === floor ? `Ultima offerta: ${eur(next)}.` : `Vengo incontro: ${eur(next)}.`,
-  };
-}
-
-function lastAskFor(jobId, workerId) {
-  const q = get(
-    "SELECT price_cents FROM quotes WHERE job_id = ? AND worker_id = ? AND action = 'counter' ORDER BY round DESC LIMIT 1",
-    jobId, workerId,
-  );
-  return q ? q.price_cents : null;
-}
-
 function participants(job) {
   const { eligible } = rankCandidates(job);
-  const fixed = job.deal?.participants;
-  let list = eligible;
-  if (fixed?.length) {
-    const still = eligible.filter((c) => fixed.includes(c.worker.id));
-    // top up if some participants went offline
-    list = [...still, ...eligible.filter((c) => !fixed.includes(c.worker.id))];
+  const k = job.headcount > 1 ? Math.min(12, job.headcount * 2 + 2) : 5;
+  const list = eligible.slice(0, k);
+  if (list.length < k) {
+    // Also ask capable partners who are busy in the window: they may counter.
+    const ids = new Set(list.map((c) => c.worker.id));
+    const perHour = job.price.seat_payout_cents / Math.max(0.5, job.duration_min / 60);
+    const extra = all("SELECT * FROM workers WHERE status = 'active' AND verified = 1")
+      .filter((w) => !ids.has(w.id) && w.skills.includes(job.service) && haversineKm(w, job) <= 18)
+      .map((w) => ({ worker: w, start: null, capacity_free: 0, score: 0, busy: true, underpaid: perHour < w.min_hourly_cents }))
+      .slice(0, k - list.length);
+    list.push(...extra);
   }
-  return list.slice(0, PARTICIPANTS);
+  return list;
 }
 
-export async function negotiateRound(jobId, offerCents, { actor = 'buyer_agent', message = null } = {}) {
-  if (busy.has(jobId)) throw new HttpError(409, 'round_in_progress', 'A negotiation round is already running for this job.');
-  const job = get('SELECT * FROM jobs WHERE id = ?', jobId);
-  if (!job) throw new HttpError(404, 'job_not_found', 'Job not found');
-  if (job.status !== 'negotiating') {
-    throw new HttpError(409, 'not_negotiating', `Job is ${job.status}; negotiation is closed.`);
+function acceptLine(service, job, c, seats) {
+  const when = slotLabel(c.start, job.duration_min);
+  if (job.headcount > 1) {
+    return c.worker.kind === 'business'
+      ? `Copro ${seats} ${seats === 1 ? 'posto' : 'posti'} su ${job.headcount} con la mia squadra, ${when}.`
+      : `Disponibile per il turno ${when}.`;
   }
-  if (!Number.isFinite(offerCents) || offerCents < 100) throw new HttpError(400, 'invalid_offer', 'offer must be at least €1.00');
+  const crew = c.worker.kind === 'business' ? ' con la squadra' : '';
+  return `Ci sono ${when}${crew}. Durata stimata ${durationLabel(job.duration_min)}.`;
+}
+
+export function supplierReply(job, service, c) {
+  if (c.underpaid) {
+    return { action: 'decline', slot_start: null, seats: 0, message: `Il compenso è sotto la mia tariffa minima (${eur(c.worker.min_hourly_cents)}/h).` };
+  }
+  if (!c.busy && c.start) {
+    const seats = job.headcount > 1 ? Math.min(maxSeatsPerSupplier(job.headcount), c.worker.kind === 'business' ? c.capacity_free : 1) : 1;
+    return { action: 'accept', slot_start: c.start, seats, message: acceptLine(service, job, c, seats) };
+  }
+  const next = nextAvailability(c.worker, job);
+  if (next) {
+    return { action: 'counter', slot_start: next, seats: 1, message: `In quella fascia sono pieno. Posso ${slotLabel(next, job.duration_min)}.` };
+  }
+  return { action: 'decline', slot_start: null, seats: 0, message: 'Non ho disponibilità nei prossimi 7 giorni.' };
+}
+
+export async function negotiateRound(jobId, { windows = null, actor = 'buyer_agent', message = null } = {}) {
+  if (busy.has(jobId)) throw new HttpError(409, 'round_in_progress', 'A negotiation round is already running for this job.');
+  let job = get('SELECT * FROM jobs WHERE id = ?', jobId);
+  if (!job) throw new HttpError(404, 'job_not_found', 'Job not found');
+  if (job.status !== 'scheduling') throw new HttpError(409, 'not_scheduling', `Job is ${job.status}; negotiation is closed.`);
   const round = job.negotiation_round + 1;
   if (round > MAX_ROUNDS) throw new HttpError(409, 'too_many_rounds', `Max ${MAX_ROUNDS} rounds. Accept a quote or cancel.`);
-  const skill = getSkill(job.skill);
-  const parts = participants(job);
-  if (!parts.length) {
-    throw new HttpError(409, 'no_supply', NO_SUPPLY_IT, { job_id: jobId });
+  const service = getService(job.service);
+  if (windows?.length) {
+    const w = windows[0];
+    const s = Date.parse(w.start);
+    const e = w.end ? Date.parse(w.end) : s + job.duration_min * 60000;
+    if (Number.isNaN(s) || e <= s) throw new HttpError(400, 'invalid_window', 'windows[0] needs valid start/end');
+    const minutes = service.flexible ? job.duration_min : Math.round((e - s) / 60000);
+    const price = priceQuote(service, job.params, { start: s, minutes, now: clock.now() });
+    update('jobs', jobId, { window_start: s, window_end: Math.max(e, s + minutes * 60000), flexible: service.flexible && e - s > minutes * 60000 ? 1 : 0, duration_min: price.minutes, price });
+    job = get('SELECT * FROM jobs WHERE id = ?', jobId);
   }
+  const parts = participants(job);
+  if (!parts.length) throw new HttpError(409, 'no_supply', NO_SUPPLY_IT, { job_id: jobId });
   busy.add(jobId);
   try {
+    const windowLabel = job.flexible ? slotLabel(job.window_start, Math.round((job.window_end - job.window_start) / 60000)) : slotLabel(job.window_start, job.duration_min);
     if (round === 1) {
-      update('jobs', jobId, { deal: { state: 'open', participants: parts.map((c) => c.worker.id) } });
-      emit('negotiation.started', {
-        job_id: jobId, actor,
-        data: { participants: parts.map((c) => ({ worker_ref: c.worker.id, alias: c.worker.display_name, agent: `supplier-agent/${c.worker.id}`, score: c.score, eta_min: c.eta_min, rating: c.rating })) },
-      });
+      emit('negotiation.started', { job_id: jobId, actor, data: { participants: parts.map((c) => ({ worker_ref: c.worker.id, alias: c.worker.display_name, kind: c.worker.kind, agent: `supplier-agent/${c.worker.id}` })) } });
     }
     update('jobs', jobId, { negotiation_round: round, updated_at: clock.now() });
-    emit('negotiation.buyer_offer', { job_id: jobId, actor, data: { round, offer_cents: offerCents, message: message ?? `Offro ${eur(offerCents)}.` } });
-
-    // Supplier agents "think" in parallel and answer as they finish.
+    emit('negotiation.buyer_offer', {
+      job_id: jobId, actor,
+      data: { round, window: windowLabel, price_cents: job.price.total_cents, headcount: job.headcount, message: message ?? `${service.name_it}${job.headcount > 1 ? ` · ${job.headcount} persone` : ''}, ${windowLabel}. Prezzo fisso ${eur(job.price.total_cents)}. Chi è disponibile?` },
+    });
     const responses = await Promise.all(parts.map(async (c) => {
-      await sleep(negotiationDelay());
-      const r = supplierPolicy(c, skill, offerCents, round, lastAskFor(jobId, c.worker.id));
-      const quote = {
-        id: id('q'), job_id: jobId, round, worker_id: c.worker.id, buyer_offer_cents: offerCents,
-        action: r.action, price_cents: r.price_cents, eta_min: c.eta_min, message: r.message, created_at: clock.now(),
-      };
-      insert('quotes', quote);
+      await sleep(delay());
+      const r = supplierReply(job, service, c);
+      const q = { id: id('q'), job_id: jobId, round, worker_id: c.worker.id, action: r.action, slot_start: r.slot_start, seats: r.seats, eta_min: null, message: r.message, created_at: clock.now() };
+      insert('quotes', q);
       const out = {
-        quote_id: quote.id, worker_ref: c.worker.id, alias: c.worker.display_name, agent: `supplier-agent/${c.worker.id}`,
-        action: r.action, price_cents: r.price_cents, eta_min: c.eta_min, score: c.score, rating: c.rating, message: r.message,
+        quote_id: q.id, worker_ref: c.worker.id, alias: c.worker.display_name, kind: c.worker.kind, agent: `supplier-agent/${c.worker.id}`,
+        action: r.action, slot_start: r.slot_start ? new Date(r.slot_start).toISOString() : null,
+        slot_label: r.slot_start ? slotLabel(r.slot_start, job.duration_min) : null, seats: r.seats,
+        score: c.score, rating: c.rating ?? null, message: r.message,
       };
       emit('negotiation.supplier_response', { job_id: jobId, worker_id: c.worker.id, actor: out.agent, data: { round, ...out } });
       return out;
     }));
     responses.sort((a, b) => b.score - a.score);
     const accepts = responses.filter((r) => r.action === 'accept');
-    const counters = responses.filter((r) => r.action === 'counter');
+    const counters = responses.filter((r) => r.action === 'counter').sort((a, b) => Date.parse(a.slot_start) - Date.parse(b.slot_start));
+    const covered = Math.min(job.headcount, accepts.reduce((a, r) => a + r.seats, 0));
     return {
-      job_id: jobId,
-      round,
-      buyer_offer_cents: offerCents,
+      job_id: jobId, round, window: windowLabel, price_cents: job.price.total_cents, headcount: job.headcount,
+      seats_available: covered,
       responses,
       best_accept: accepts[0] ?? null,
-      lowest_counter: counters.sort((a, b) => a.price_cents - b.price_cents)[0] ?? null,
+      earliest_counter: counters[0] ?? null,
       hint: accepts.length
-        ? `Accepted by ${accepts.length} supplier agent(s). Call accept_quote with quote_id ${accepts[0].quote_id} to lock the deal.`
-        : 'No acceptance yet. Raise your offer, or accept a counter via accept_quote.',
+        ? `${covered}/${job.headcount} seat(s) available in the window. accept_quote(${accepts[0].quote_id}) to lock the slot.`
+        : counters.length
+          ? `Nobody free in the window. Earliest counter-proposal: ${counters[0].slot_label} — accept_quote(${counters[0].quote_id}) or negotiate with another window.`
+          : 'No availability. Try another window or cancel.',
     };
   } finally {
     busy.delete(jobId);
   }
 }
 
-// Lock a deal from a quote. The deal price becomes the job price; the dispatch
-// pool is every eligible worker whose supplier agent would work at that price,
-// ranked by match score (offer goes to the highest score first).
 export function acceptQuote(jobId, quoteId, { actor = 'buyer_agent' } = {}) {
   const job = get('SELECT * FROM jobs WHERE id = ?', jobId);
   if (!job) throw new HttpError(404, 'job_not_found', 'Job not found');
-  if (job.status !== 'negotiating') throw new HttpError(409, 'not_negotiating', `Job is ${job.status}.`);
-  const quote = get('SELECT * FROM quotes WHERE id = ? AND job_id = ?', quoteId, jobId);
-  if (!quote) throw new HttpError(404, 'quote_not_found', 'Quote not found for this job');
-  if (quote.action === 'reject') throw new HttpError(409, 'quote_rejected', 'That supplier walked away; pick another quote.');
-  const price = quote.price_cents;
-  if (job.budget_max_cents && price > job.budget_max_cents) {
-    throw new HttpError(409, 'over_budget', `Quote ${eur(price)} exceeds your max budget ${eur(job.budget_max_cents)}.`);
+  if (job.status !== 'scheduling') throw new HttpError(409, 'not_scheduling', `Job is ${job.status}.`);
+  const q = get('SELECT * FROM quotes WHERE id = ? AND job_id = ?', quoteId, jobId);
+  if (!q) throw new HttpError(404, 'quote_not_found', 'Quote not found for this job');
+  if (q.action === 'decline') throw new HttpError(409, 'quote_declined', 'That supplier declined; pick another quote.');
+  const service = getService(job.service);
+  const now = clock.now();
+  const slot = q.slot_start;
+  const patch = { slot_start: slot, updated_at: now };
+  let price = job.price;
+  if (slot < job.window_start || slot + job.duration_min * 60000 > job.window_end) {
+    // Counter-proposal outside the original window: move the window and re-quote.
+    price = priceQuote(service, job.params, { start: slot, minutes: job.duration_min, now });
+    Object.assign(patch, { window_start: slot, window_end: slot + job.duration_min * 60000, flexible: 0, price });
   }
-  const pool = rankCandidates(job).eligible.filter((c) => c.floor_cents <= price);
-  if (!pool.length) {
-    update('jobs', jobId, { status: 'no_match', status_message: NO_SUPPLY_IT, updated_at: clock.now() });
+  const view = { ...job, ...patch };
+  const pool = rankCandidates(view, { slotStart: slot }).eligible;
+  const quoted = pool.find((c) => c.worker.id === q.worker_id);
+  const ordered = quoted ? [quoted, ...pool.filter((c) => c !== quoted)] : pool;
+  if (!ordered.length) {
+    update('jobs', jobId, { status: 'no_match', status_message: NO_SUPPLY_IT, updated_at: now });
     emit('job.no_match', { job_id: jobId, data: { message: NO_SUPPLY_IT, stage: 'deal' } });
     throw new HttpError(409, 'no_supply', NO_SUPPLY_IT, { job_id: jobId });
   }
-  const lead = pool[0];
-  const fee = Math.round(price * PLATFORM_FEE);
+  const lead = ordered[0];
+  const seatsInPool = Math.min(job.headcount, ordered.reduce((a, c) => a + (c.worker.kind === 'business' ? Math.min(c.capacity_free, maxSeatsPerSupplier(job.headcount)) : 1), 0));
   const deal = {
     state: 'locked',
-    price_cents: price,
-    platform_fee_cents: fee,
-    worker_payout_cents: price - fee,
-    currency: 'EUR',
-    quote_id: quote.id,
-    quoted_by: quote.worker_id,
+    slot_start: slot,
+    slot_label: slotLabel(slot, job.duration_min),
+    price_cents: price.total_cents,
+    repriced: price !== job.price,
+    quote_id: q.id,
+    lead: { worker_ref: lead.worker.id, alias: lead.worker.display_name, kind: lead.worker.kind, rating: lead.rating, rating_count: lead.rating_count, score: lead.score, insured: !!lead.worker.insured },
+    seats_available: seatsInPool,
+    headcount: job.headcount,
+    pool: ordered.map((c) => c.worker.id),
     rounds: job.negotiation_round,
-    eta_min: lead.eta_min,
-    lead: { worker_ref: lead.worker.id, alias: lead.worker.display_name, rating: lead.rating, rating_count: lead.rating_count, vehicle: lead.worker.vehicle, score: lead.score, kind: lead.worker.kind },
-    pool: pool.map((c) => c.worker.id),
-    pool_size: pool.length,
-    participants: job.deal?.participants ?? [],
-    locked_at: clock.now(),
-    valid_until: clock.now() + DEAL_VALID_MS,
+    locked_at: now,
   };
-  update('jobs', jobId, { deal, status: 'pending_confirmation', status_message: 'In attesa di conferma umana', updated_at: clock.now() });
+  update('jobs', jobId, { ...patch, deal, status: 'pending_confirmation', status_message: 'In attesa di approvazione', dispatch_pool: deal.pool });
   emit('negotiation.deal', { job_id: jobId, actor, data: { ...deal, pool: undefined } });
-  return deal;
+
+  // Business accounts: auto-approve under the policy threshold (no human tap).
+  const account = get('SELECT * FROM accounts WHERE id = ?', job.account_id);
+  const limit = account?.org?.auto_approve_max_cents;
+  if (account?.kind === 'business' && limit != null && price.total_cents <= limit) {
+    confirmJob(jobId, { by: 'policy', rule: `Approvazione automatica fino a ${eur(limit)} (policy ${account.org.legal_name ?? account.name})` });
+    return { deal, auto_approved: true };
+  }
+  return { deal, auto_approved: false };
 }
 
-// Aronica's built-in buyer agent: opens at target, concedes toward the best
-// counter, never exceeds max, prefers higher-scored suppliers.
-export async function autoNegotiate(jobId, { target_cents, max_cents } = {}) {
-  let job = get('SELECT * FROM jobs WHERE id = ?', jobId);
-  if (!job) throw new HttpError(404, 'job_not_found', 'Job not found');
-  const skill = getSkill(job.skill);
-  const max = max_cents ?? job.budget_max_cents ?? round50(skill.base_price_cents * 1.6);
-  let offer = Math.min(max, target_cents ?? job.budget_target_cents ?? round50(skill.base_price_cents * 0.85));
-  if (max_cents && max_cents !== job.budget_max_cents) update('jobs', jobId, { budget_max_cents: max_cents });
-  const actor = 'Aronica Buyer Agent';
-  let last = null;
-  for (let round = job.negotiation_round + 1; round <= MAX_ROUNDS; round++) {
-    const res = await negotiateRound(jobId, offer, { actor, message: round === 1 ? `Budget obiettivo. Offro ${eur(offer)}.` : `Rilancio a ${eur(offer)}.` });
-    last = res;
-    // Value = price inflated by how far the supplier is from a perfect match:
-    // the buyer agent pays a bit more for the best-ranked worker (Uber gives you
-    // the best available driver, not the cheapest).
-    const eff = (r) => r.price_cents * (1 + (100 - r.score) / 100);
-    const accepts = res.responses.filter((r) => r.action === 'accept');
-    const counters = res.responses.filter((r) => r.action === 'counter' && r.price_cents <= max);
-    const best = [...accepts, ...counters].sort((a, b) => eff(a) - eff(b))[0];
-    if (best?.action === 'accept') return { deal: acceptQuote(jobId, best.quote_id, { actor }), rounds: res.round };
-    if (best && (accepts.length || best.price_cents - offer <= Math.max(100, offer * 0.06) || res.round >= 5)) {
-      emit('negotiation.buyer_offer', { job_id: jobId, actor, data: { round: res.round, accept_quote: best.quote_id, offer_cents: best.price_cents, message: `Accetto la controproposta di ${best.alias}: ${eur(best.price_cents)} (miglior rapporto qualità/prezzo).` } });
-      return { deal: acceptQuote(jobId, best.quote_id, { actor }), rounds: res.round };
-    }
-    const lowest = res.responses.filter((r) => r.action === 'counter').sort((a, b) => a.price_cents - b.price_cents)[0];
-    if (!lowest) break;
-    let next = Math.min(max, round50(offer + (lowest.price_cents - offer) * 0.55));
-    if (next <= offer) next = Math.min(max, offer + 100);
-    if (next === offer && offer === max && res.round >= 6) break;
-    offer = next;
-    // The buyer agent "thinks" between rounds so humans can follow along live.
-    await sleep(Number(process.env.ARONICA_NEG_DELAY_MS ?? 800) * 1.5);
-    job = get('SELECT * FROM jobs WHERE id = ?', jobId);
+// Aronica's built-in buyer agent: take the best partner free in the window;
+// otherwise leave the counter-proposals to the human (or the external agent).
+export async function autoNegotiate(jobId) {
+  const res = await negotiateRound(jobId, { actor: 'Aronica Buyer Agent' });
+  if (res.best_accept) {
+    const r = acceptQuote(jobId, res.best_accept.quote_id, { actor: 'Aronica Buyer Agent' });
+    return { ...r, round: res };
   }
-  const lowest = last?.lowest_counter;
-  const msg = lowest
-    ? `Nessun accordo entro ${eur(max)}. Miglior controproposta: ${eur(lowest.price_cents)} (${lowest.alias}).`
-    : `Nessun accordo entro ${eur(max)}.`;
+  const msg = res.earliest_counter
+    ? `Nessuno è libero nella fascia richiesta. Prima alternativa: ${res.earliest_counter.slot_label} (${res.earliest_counter.alias}).`
+    : NO_SUPPLY_IT;
   update('jobs', jobId, { status_message: msg, updated_at: clock.now() });
-  emit('negotiation.failed', { job_id: jobId, actor, data: { message: msg, max_cents: max, lowest_counter: lowest ?? null } });
-  return { deal: null, message: msg, lowest_counter: lowest ?? null };
+  emit('negotiation.counters', { job_id: jobId, actor: 'Aronica Buyer Agent', data: { message: msg, counters: res.responses.filter((r) => r.action === 'counter') } });
+  return { deal: null, message: msg, counters: res.responses.filter((r) => r.action === 'counter'), round: res };
 }
 
 export function quotesForJob(jobId) {
   return all('SELECT * FROM quotes WHERE job_id = ? ORDER BY round, created_at', jobId);
 }
+
+export { freeCapacity };

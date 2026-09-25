@@ -1,6 +1,6 @@
 // Ops: live platform view — supply map, reliability tiers, verification queue,
 // dispatch cascade, event log, demo settings, API keys.
-import { h, mount, api, sse, eur, pct, hhmm, toast, avatar, createMap, taskPin, workerPin, VEHICLE_IT } from './common.js';
+import { h, mount, api, sse, eur, pct, hhmm, dayhhmm, toast, avatar, createMap, taskPin, workerPin, VEHICLE_IT, setClockOffset } from './common.js';
 
 let main;
 let log;
@@ -27,14 +27,20 @@ async function act(path, body) {
 
 function render() {
   const s = state.settings;
+  setClockOffset(state.clock.offset_ms);
+  const jump = (body) => act('/api/ops/clock', body);
   mount(settingsEl,
+    h('span.row', { style: { gap: '6px' } }, h('span.badge', {}, `Orologio: ${dayhhmm(state.clock.now)}${state.clock.offset_ms > 60000 ? ' (avanzato)' : ''}`),
+      h('button.btn.sm', { disabled: !state.clock.next_slot, title: state.clock.next_slot ? `Prossimo lavoro: ${dayhhmm(state.clock.next_slot)}` : 'Nessun lavoro programmato', onclick: () => jump({ to: 'next_slot' }) }, 'Vai al prossimo lavoro'),
+      h('button.btn.sm', { onclick: () => jump({ advance_ms: 3600000 }) }, '+1h'),
+      h('button.btn.sm', { onclick: () => jump({ advance_ms: 6 * 3600000 }) }, '+6h')),
     h('label.row', {}, 'TTL offerta', h('input.input', { type: 'number', min: 5, max: 120, value: s.offer_ttl_s, style: { width: '72px', padding: '6px 8px' }, onchange: (e) => act('/api/ops/settings', { offer_ttl_s: Number(e.target.value) }) }), 's'),
     h('label.row', {}, 'Velocità sim.', h('input.input', { type: 'number', min: 1, max: 120, value: s.sim_speedup, style: { width: '72px', padding: '6px 8px' }, onchange: (e) => act('/api/ops/settings', { sim_speedup: Number(e.target.value) }) }), '×'),
     h('label.row', {}, h('input', { type: 'checkbox', checked: s.simulate_workers, onchange: (e) => act('/api/ops/settings', { simulate_workers: e.target.checked }) }), 'Simula profili demo'));
 
   const W = state.workers;
   const online = W.filter((w) => w.online && w.status === 'active');
-  const live = state.jobs.filter((j) => ['dispatching', 'assigned', 'en_route', 'on_site'].includes(j.status));
+  const live = state.jobs.filter((j) => ['dispatching', 'assigned', 'in_progress'].includes(j.status));
   const done = state.jobs.filter((j) => j.status === 'done');
   const pending = W.filter((w) => w.status === 'pending_verification');
 
@@ -55,8 +61,8 @@ function render() {
   const jobRow = (j) => h('tr', {},
     h('td', {}, h('b', {}, j.title), h('div.xs.faint', {}, `${j.id} · ${j.skill} · ${j.agent_name}`)),
     h('td', {}, h('span.badge', { class: j.status === 'done' ? 'green' : ['no_match', 'expired', 'cancelled'].includes(j.status) ? 'red' : 'blue' }, j.status)),
-    h('td.num', {}, j.deal?.price_cents ? eur(j.deal.price_cents) : '—'),
-    h('td', {}, j.worker ? j.worker.alias : j.dispatch ? `offerte ${j.dispatch.tried}/${j.dispatch.pool_size}` : '—'),
+    h('td.num', {}, eur(j.price?.total_cents)),
+    h('td', {}, j.headcount > 1 ? `${j.seats_filled}/${j.headcount} posti` : (j.assignments.find((a) => !['cancelled', 'no_show'].includes(a.status))?.worker.alias ?? (j.dispatch ? `offerte ${j.dispatch.tried}` : '—')), h('div.xs.faint', {}, j.slot?.label ?? j.window?.label ?? '')),
     h('td.num', {}, hhmm(j.created_at)));
 
   const offerRow = (o) => h('tr', {},
@@ -80,20 +86,29 @@ function render() {
         h('tbody', {}, W.map(workerRow))))),
     h('section', {}, h('h3', { style: { marginBottom: '8px' } }, 'Lavori'),
       h('div.tablewrap', {}, h('table.table', {},
-        h('thead', {}, h('tr', {}, ['Lavoro', 'Stato', 'Prezzo', 'Partner / cascata', 'Creato'].map((x) => h('th', {}, x)))),
+        h('thead', {}, h('tr', {}, ['Lavoro', 'Stato', 'Prezzo', 'Persone / slot', 'Creato'].map((x) => h('th', {}, x)))),
         h('tbody', {}, state.jobs.length ? state.jobs.map(jobRow) : h('tr', {}, h('td.muted', { colspan: 5 }, 'Nessun lavoro ancora. Crea una richiesta dal Buyer console o da un agente.')))))),
+    h('section', {}, h('h3', { style: { marginBottom: '8px' } }, 'Assegnazioni e contratti'),
+      h('div.tablewrap', {}, h('table.table', {},
+        h('thead', {}, h('tr', {}, ['Lavoro', 'Partner', 'Stato', 'Contratto', 'Compenso', ''].map((x) => h('th', {}, x)))),
+        h('tbody', {}, state.assignments.length ? state.assignments.map((a) => h('tr', {},
+          h('td', {}, a.title), h('td', {}, a.worker, a.crew > 1 ? h('span.xs.faint', {}, ` × ${a.crew}`) : null),
+          h('td', {}, h('span.badge', { class: a.status === 'done' ? 'green' : a.status === 'no_show' ? 'red' : 'blue' }, a.status)),
+          h('td.xs', {}, a.contract ?? '—'), h('td.num', {}, eur(a.payout_cents)),
+          h('td', {}, ['assigned', 'en_route'].includes(a.status) ? h('button.btn.sm', { onclick: () => act(`/api/ops/assignments/${a.id}/no-show`) }, 'Simula no-show') : null))) : h('tr', {}, h('td.muted', { colspan: 6 }, '—')))))),
     h('section', {}, h('h3', { style: { marginBottom: '8px' } }, 'Offerte a tempo (cascata)'),
       h('div.tablewrap', {}, h('table.table', {},
         h('thead', {}, h('tr', {}, ['Job', 'Rank', 'Partner', 'Score', 'Esito', 'Inviata'].map((x) => h('th', {}, x)))),
         h('tbody', {}, state.offers.length ? state.offers.map(offerRow) : h('tr', {}, h('td.muted', { colspan: 6 }, '—')))))),
     h('section', {}, h('h3', { style: { marginBottom: '8px' } }, 'API key per agenti'),
-      h('div.tablewrap', {}, h('table.table', {}, h('tbody', {}, state.accounts.map((a) => h('tr', {}, h('td', {}, a.name), h('td.mono', {}, a.api_key), h('td.xs.faint', {}, a.created_at)))))),
+      h('div.tablewrap', {}, h('table.table', {}, h('tbody', {}, state.accounts.map((a) => h('tr', {}, h('td', {}, a.name), h('td', {}, h('span.badge', {}, a.kind === 'business' ? 'Azienda' : 'Privato')), h('td.mono', {}, a.api_key), h('td.xs.faint', {}, a.created_at)))))),
       newKey ? h('div.card.flat.small', { style: { marginTop: '8px' } }, 'Nuova chiave (mostrata una sola volta): ', h('b.mono', {}, newKey)) : null,
       h('div.row', { style: { marginTop: '8px' } },
         h('input.input', { id: 'keyname', placeholder: 'Nome agente (es. Grok Bot)', style: { maxWidth: '260px' } }),
+        h('select.input', { id: 'keykind', style: { maxWidth: '160px' } }, h('option', { value: 'consumer' }, 'Privato'), h('option', { value: 'business' }, 'Azienda')),
         h('button.btn.sm.primary', {
           onclick: async () => {
-            const r = await api('/api/ops/keys', { method: 'POST', body: { name: main.querySelector('#keyname').value || 'Agent' } });
+            const r = await api('/api/ops/keys', { method: 'POST', body: { name: main.querySelector('#keyname').value || 'Agent', kind: main.querySelector('#keykind').value } });
             newKey = r.api_key; load();
           },
         }, 'Crea chiave'))));
@@ -108,7 +123,7 @@ function drawMap() {
     seen.add(`w:${w.id}`);
     map.set(`w:${w.id}`, { lat: w.lat, lng: w.lng, html: workerPin(w.display_name, w.avatar_color, { off: !w.online || w.status !== 'active', busy: w.active_jobs > 0 }), animate: true });
   }
-  for (const j of state.jobs.filter((x) => ['dispatching', 'assigned', 'en_route', 'on_site'].includes(x.status))) {
+  for (const j of state.jobs.filter((x) => ['scheduling', 'dispatching', 'assigned', 'in_progress'].includes(x.status))) {
     seen.add(`j:${j.id}`);
     map.set(`j:${j.id}`, { lat: j.location.lat, lng: j.location.lng, html: taskPin(null, { pulse: j.status === 'dispatching' }), z: 400 });
   }

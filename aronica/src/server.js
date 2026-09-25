@@ -4,19 +4,21 @@ import { join, extname, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { timingSafeEqual } from 'node:crypto';
 import { openDb, get, all, update, insert, getSetting, setSetting } from './db.js';
-import { seed, CONSOLE_ACCOUNT } from './seed.js';
+import { seed, CONSOLE_ACCOUNT, CONSOLE_BUSINESS_ACCOUNT } from './seed.js';
 import { TOOLS, callTool, accountFromKey, openAiTools } from './connector.js';
 import { handleMcpHttp } from './mcp.js';
 import { openApiSpec } from './openapi.js';
 import { openSse, eventsForJob, recentEvents, realGps } from './events.js';
-import { listSkills } from './skills.js';
+import { listServices } from './services.js';
+import { compileTask } from './compiler.js';
+import { CAPS, ROUTES } from './compliance.js';
 import { CITY, GAZETTEER, VEHICLES, geocode, inServiceArea } from './geo.js';
 import { RATING_TAGS, THRESHOLDS, evaluate, enforce } from './reliability.js';
 import { WEIGHTS } from './matching.js';
-import { createJob, serializeJob, loadJob, rateWorker, publicWorker, ACTIVE, BASE_URL } from './jobs.js';
-import { autoNegotiate, quotesForJob } from './negotiation.js';
+import { createJob, serializeJob, serializeAssignment, loadJob, rateWorker, publicWorker, BASE_URL } from './jobs.js';
+import { autoNegotiate, acceptQuote, quotesForJob } from './negotiation.js';
 import {
-  confirmJob, buyerCancel, respondOffer, startJob, arriveJob, submitProof, workerCancel,
+  confirmJob, buyerCancel, respondOffer, startJob, arriveJob, submitProof, workerCancel, markNoShow,
   pendingOffersForWorker, tick, UPLOAD_DIR,
 } from './dispatch.js';
 import { moveWorkers, runBots } from './sim.js';
@@ -98,16 +100,26 @@ function queryArgs(url) {
   return out;
 }
 
+const clockOffset = () => clock.now() - Date.now();
+
 // ---------------------------------------------------------------- views
 function workerSelf(w) {
   const ev = evaluate(w);
-  const jobs = all(`SELECT * FROM jobs WHERE assigned_worker_id = ? AND status IN ('assigned','en_route','on_site') ORDER BY assigned_at`, w.id);
-  const history = all(`SELECT * FROM jobs WHERE assigned_worker_id = ? AND status IN ('done','cancelled','expired') ORDER BY updated_at DESC LIMIT 20`, w.id);
+  const mine = (statuses) => all(`SELECT a.* FROM assignments a JOIN jobs j ON j.id = a.job_id WHERE a.worker_id = ? AND a.status IN (${statuses.map(() => '?').join(',')}) ORDER BY j.slot_start`, w.id, ...statuses);
+  const active = mine(['assigned', 'en_route', 'on_site']).map((a) => {
+    const j = loadJob(a.job_id);
+    return { ...serializeJob(j), assignment: serializeAssignment(a, j), pay_cents: a.payout_cents };
+  });
+  const history = mine(['done', 'cancelled', 'no_show']).slice(-20).reverse().map((a) => {
+    const j = loadJob(a.job_id);
+    return { id: j.id, title: j.title, status: a.status, pay_cents: a.status === 'done' ? a.payout_cents : 0, completed_at: iso(a.completed_at ?? j.updated_at), buyer_rating: a.buyer_rating, contract: a.contract?.label_it };
+  });
   const reviews = all('SELECT stars, tags, comment, excluded, created_at FROM ratings WHERE worker_id = ? AND job_id IS NOT NULL ORDER BY created_at DESC LIMIT 10', w.id);
   return {
     worker: {
       id: w.id, kind: w.kind, display_name: w.display_name, legal_name: w.legal_name, vat_id: w.vat_id, bio: w.bio,
-      zone: w.zone, lat: w.lat, lng: w.lng, vehicle: w.vehicle, skills: w.skills, skill_jobs: w.skill_jobs,
+      zone: w.zone, lat: w.lat, lng: w.lng, vehicle: w.vehicle, skills: w.skills, skill_jobs: w.skill_jobs, availability: w.availability,
+      min_hourly_cents: w.min_hourly_cents, insured: !!w.insured,
       capacity: w.capacity, online: !!w.online, verified: !!w.verified, verification_note: w.verification_note,
       status: w.status, tier: w.tier, tier_reasons: w.tier_reasons, avatar_color: w.avatar_color,
       jobs_completed: w.jobs_completed, earnings_cents: w.earnings_cents, simulated: !!w.simulated, real_gps: realGps.has(w.id),
@@ -117,9 +129,9 @@ function workerSelf(w) {
       rating: ev.rating, completion: ev.metrics.completion, acceptance: ev.metrics.acceptance, cancel_rate: ev.metrics.cancel_rate,
       no_shows: w.no_shows, thresholds: THRESHOLDS,
     },
-    active_jobs: jobs.map((j) => ({ ...serializeJob(j), proof_requirements: j.proof_req, pay_cents: j.deal?.worker_payout_cents })),
+    active_jobs: active,
     offers: pendingOffersForWorker(w.id),
-    history: history.map((j) => ({ id: j.id, title: j.title, status: j.status, pay_cents: j.status === 'done' ? j.deal?.worker_payout_cents : 0, completed_at: iso(j.completed_at ?? j.updated_at), buyer_rating: j.buyer_rating, skill: j.skill })),
+    history,
     reviews: reviews.map((r) => ({ ...r, created_at: iso(r.created_at) })),
   };
 }
@@ -138,10 +150,14 @@ function opsState() {
   const jobs = all('SELECT * FROM jobs ORDER BY created_at DESC LIMIT 40').map((j) => serializeJob(j));
   const offers = all("SELECT o.*, w.display_name FROM offers o JOIN workers w ON w.id = o.worker_id ORDER BY o.created_at DESC LIMIT 40")
     .map((o) => ({ ...o, created_at: iso(o.created_at), expires_at: iso(o.expires_at), responded_at: iso(o.responded_at) }));
-  const accounts = all("SELECT id, name, kind, api_key, created_at FROM accounts WHERE kind = 'agent'")
+  const accounts = all("SELECT id, name, kind, api_key, created_at FROM accounts WHERE api_key IS NOT NULL")
     .map((a) => ({ ...a, api_key: a.api_key.slice(0, 6) + '…' + a.api_key.slice(-4), created_at: iso(a.created_at) }));
+  const assignments = all("SELECT a.*, w.display_name, j.title FROM assignments a JOIN workers w ON w.id = a.worker_id JOIN jobs j ON j.id = a.job_id ORDER BY a.assigned_at DESC LIMIT 40")
+    .map((a) => ({ id: a.id, job_id: a.job_id, title: a.title, worker: a.display_name, crew: a.crew, status: a.status, contract: a.contract?.label_it, payout_cents: a.payout_cents, assigned_via: a.assigned_via }));
+  const next = get("SELECT MIN(slot_start) AS t FROM jobs WHERE status IN ('assigned','dispatching','in_progress') AND slot_start > ?", clock.now());
   return {
-    workers, jobs, offers, accounts,
+    workers, jobs, offers, accounts, assignments,
+    clock: { now: iso(clock.now()), offset_ms: clockOffset(), next_slot: iso(next?.t ?? null) },
     events: recentEvents(60),
     settings: { offer_ttl_s: getSetting('offer_ttl_s', 20), simulate_workers: getSetting('simulate_workers', true), sim_speedup: getSetting('sim_speedup', 30) },
   };
@@ -151,7 +167,13 @@ function config() {
   return {
     city: CITY,
     places: GAZETTEER.map(({ name, lat, lng }) => ({ name, lat, lng })),
-    skills: listSkills().map((s) => ({ code: s.code, name_it: s.name_it, name_en: s.name_en, description: s.description, base_price_cents: s.base_price_cents, typical_minutes: s.typical_minutes, default_proof: s.default_proof })),
+    services: listServices().map((s) => ({ code: s.code, segment: s.segment, name_it: s.name_it, description: s.description, params: s.params, proof: s.proof, flexible: !!s.flexible, multi_seat: !!s.multi_seat })),
+    contracts: { routes: ROUTES, caps: CAPS },
+    accounts: {
+      consumer: { id: CONSOLE_ACCOUNT, label: 'Privato' },
+      business: { id: CONSOLE_BUSINESS_ACCOUNT, label: get('SELECT org FROM accounts WHERE id = ?', CONSOLE_BUSINESS_ACCOUNT)?.org?.legal_name, org: get('SELECT org FROM accounts WHERE id = ?', CONSOLE_BUSINESS_ACCOUNT)?.org },
+    },
+    clock_offset_ms: clockOffset(),
     rating_tags: RATING_TAGS,
     vehicles: VEHICLES,
     weights: WEIGHTS,
@@ -200,33 +222,33 @@ route('GET', '/api/geocode', ({ res, url }) => {
   json(res, 200, g ? { ...g, in_service_area: inServiceArea(g) } : { error: 'not_found' });
 });
 
-// Buyer console (human). The console's own buyer agent is Aronica's built-in one.
+// Buyer console (human). Two console accounts: a private person and a company.
+const consoleAccount = (b) => get('SELECT * FROM accounts WHERE id = ?', b.account === 'business' ? CONSOLE_BUSINESS_ACCOUNT : CONSOLE_ACCOUNT);
+route('POST', '/api/console/compile', ({ res, body }) => json(res, 200, compileTask(parseJson(body))));
 route('POST', '/api/console/jobs', ({ res, body }) => {
-  const account = get('SELECT * FROM accounts WHERE id = ?', CONSOLE_ACCOUNT);
   const input = parseJson(body);
-  const out = createJob(account, { ...input, agent_name: input.agent_name || 'Aronica Buyer Agent' });
+  const account = consoleAccount(input);
+  const out = createJob(account, { ...input, agent_name: input.agent_name || (account.kind === 'business' ? 'Agente acquisti Aurora' : 'Il tuo assistente') });
   const job = loadJob(out.job.id);
   json(res, 201, { ...out, token: job.confirm_token });
 });
 route('GET', '/api/jobs/:id', ({ res, url, params }) => {
   const job = jobWithToken(params.id, url.searchParams.get('t'));
-  const quotes = quotesForJob(job.id).map((q) => ({ ...q, created_at: iso(q.created_at) }));
+  const quotes = quotesForJob(job.id).map((q) => ({ ...q, created_at: iso(q.created_at), slot_start: iso(q.slot_start) }));
   json(res, 200, { job: serializeJob(job, { buyer: true, events: true }), quotes });
 });
-route('POST', '/api/jobs/:id/auto-negotiate', async ({ res, url, params, body }) => {
+route('POST', '/api/jobs/:id/auto-negotiate', async ({ res, url, params }) => {
   const job = jobWithToken(params.id, url.searchParams.get('t'));
-  const b = parseJson(body);
-  if (b.restart && job.status === 'negotiating') update('jobs', job.id, { negotiation_round: 0, deal: { state: 'open' } });
-  // Respond immediately; the negotiation streams over SSE.
-  json(res, 202, { ok: true });
-  autoNegotiate(job.id, {
-    target_cents: b.target_eur != null ? Math.round(b.target_eur * 100) : undefined,
-    max_cents: b.max_eur != null ? Math.round(b.max_eur * 100) : undefined,
-  }).catch((e) => emit('negotiation.failed', { job_id: job.id, data: { message: e.message } }));
+  json(res, 202, { ok: true }); // the negotiation streams over SSE
+  autoNegotiate(job.id).catch((e) => emit('negotiation.failed', { job_id: job.id, data: { message: e.message } }));
 });
-route('POST', '/api/jobs/:id/confirm', ({ res, url, params, body }) => {
+route('POST', '/api/jobs/:id/accept-quote', ({ res, url, params, body }) => {
   jobWithToken(params.id, url.searchParams.get('t'));
-  const job = confirmJob(params.id, parseJson(body));
+  json(res, 200, acceptQuote(params.id, String(parseJson(body).quote_id ?? ''), { actor: 'buyer_human' }));
+});
+route('POST', '/api/jobs/:id/confirm', ({ res, url, params }) => {
+  jobWithToken(params.id, url.searchParams.get('t'));
+  const job = confirmJob(params.id, { by: 'human' });
   json(res, 200, { job: serializeJob(job, { buyer: true }) });
 });
 route('POST', '/api/jobs/:id/cancel', ({ res, url, params, body }) => {
@@ -255,14 +277,15 @@ route('POST', '/api/worker/signup', ({ res, body }) => {
   if (name.length < 2) throw new HttpError(400, 'name_required', 'Inserisci un nome');
   if (kind === 'business' && !/^IT\d{11}$/.test(String(b.vat_id ?? '').replace(/\s/g, ''))) throw new HttpError(400, 'vat_required', 'Partita IVA non valida (formato IT + 11 cifre)');
   const place = GAZETTEER.find((g) => g.name === b.zone) ?? GAZETTEER[0];
-  const codes = new Set(listSkills().map((s) => s.code));
+  const codes = new Set(listServices().map((s) => s.code));
   const skills = (Array.isArray(b.skills) ? b.skills : []).filter((s) => codes.has(s));
   if (!skills.length) throw new HttpError(400, 'skills_required', 'Scegli almeno una competenza');
   const w = {
     id: id(kind === 'business' ? 'b' : 'w'), kind, display_name: name, legal_name: b.legal_name ? String(b.legal_name).slice(0, 120) : null,
     vat_id: kind === 'business' ? String(b.vat_id).replace(/\s/g, '') : null, bio: b.bio ? String(b.bio).slice(0, 200) : null,
     city: 'milano', zone: place.name, lat: place.lat, lng: place.lng, vehicle: VEHICLES[b.vehicle] ? b.vehicle : 'bike',
-    skills, skill_jobs: {}, rate_multiplier: 1, capacity: kind === 'business' ? Math.max(1, Math.min(20, Number(b.capacity ?? 2))) : 1,
+    skills, skill_jobs: {}, capacity: kind === 'business' ? Math.max(1, Math.min(20, Number(b.capacity ?? 2))) : 1,
+    availability: Object.fromEntries([1, 2, 3, 4, 5, 6].map((d) => [d, [[8 * 60, 20 * 60]]])), min_hourly_cents: 1200, insured: 0,
     online: 0, verified: 0, status: 'pending_verification', tier: 'good', tier_reasons: [], avatar_color: '#495057',
     simulated: 0, token: token(), joined_at: clock.now(),
   };
@@ -289,8 +312,8 @@ route('POST', '/api/worker/location', ({ req, res, url, body }) => {
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) throw new HttpError(400, 'invalid_location', 'lat/lng required');
   realGps.add(w.id);
   update('workers', w.id, { lat, lng });
-  const j = get("SELECT id FROM jobs WHERE assigned_worker_id = ? AND status IN ('en_route','on_site')", w.id);
-  emit('worker.location', { worker_id: w.id, job_id: j?.id ?? null, data: { lat, lng, simulated: false } });
+  const a = get("SELECT job_id FROM assignments WHERE worker_id = ? AND status IN ('en_route','on_site')", w.id);
+  emit('worker.location', { worker_id: w.id, job_id: a?.job_id ?? null, data: { lat, lng, simulated: false } });
   json(res, 200, { ok: true });
 });
 route('POST', '/api/worker/offers/:id/:action', ({ req, res, url, params }) => {
@@ -307,12 +330,12 @@ route('POST', '/api/worker/jobs/:id/:action', ({ req, res, url, params, body }) 
   if (a === 'cancel') return json(res, 200, workerCancel(w.id, params.id, b.reason));
   if (a === 'proof') return json(res, 200, submitProof(w.id, params.id, { photos: b.photos, answers: b.answers }));
   if (a === 'rate-buyer') {
-    const job = loadJob(params.id);
-    if (job.assigned_worker_id !== w.id || job.status !== 'done') throw new HttpError(409, 'invalid_state', 'Non valutabile');
+    const as = get("SELECT * FROM assignments WHERE job_id = ? AND worker_id = ? AND status = 'done'", params.id, w.id);
+    if (!as) throw new HttpError(409, 'invalid_state', 'Non valutabile');
     const s = Number(b.stars);
     if (!Number.isInteger(s) || s < 1 || s > 5) throw new HttpError(400, 'invalid_stars', '1..5');
-    update('jobs', job.id, { worker_rating_of_buyer: s });
-    emit('rating.buyer_rated', { job_id: job.id, worker_id: w.id, data: { stars: s } });
+    update('assignments', as.id, { worker_rating_of_buyer: s });
+    emit('rating.buyer_rated', { job_id: params.id, worker_id: w.id, data: { stars: s } });
     return json(res, 200, { ok: true });
   }
   throw new HttpError(404, 'not_found', 'Not found');
@@ -323,11 +346,11 @@ route('GET', '/api/stream', ({ req, res, url }) => {
   if (url.searchParams.get('job')) {
     const job = jobWithToken(url.searchParams.get('job'), url.searchParams.get('t'));
     const since = Number(req.headers['last-event-id'] ?? url.searchParams.get('since') ?? 0);
-    return openSse(req, res, { filter: (e) => e.job_id === job.id, backlog: since ? eventsForJob(job.id, since) : [] });
+    return openSse(req, res, { filter: (e) => e.job_id === job.id || e.type === 'clock.changed', backlog: since ? eventsForJob(job.id, since) : [] });
   }
   if (url.searchParams.get('wt')) {
     const w = workerFromReq(req, url);
-    return openSse(req, res, { filter: (e) => e.worker_id === w.id || (e.job_id && get('SELECT 1 AS x FROM jobs WHERE id = ? AND assigned_worker_id = ?', e.job_id, w.id)), workerId: w.id });
+    return openSse(req, res, { filter: (e) => e.worker_id === w.id || e.type === 'clock.changed' || (e.job_id && get("SELECT 1 AS x FROM assignments WHERE job_id = ? AND worker_id = ? AND status NOT IN ('cancelled','no_show')", e.job_id, w.id)), workerId: w.id });
   }
   if (url.searchParams.get('ops')) {
     requireOps(req, url);
@@ -369,10 +392,32 @@ route('POST', '/api/ops/settings', ({ req, res, url, body }) => {
 });
 route('POST', '/api/ops/keys', ({ req, res, url, body }) => {
   requireOps(req, url);
-  const name = String(parseJson(body).name ?? 'Agent').slice(0, 60);
+  const b = parseJson(body);
+  const name = String(b.name ?? 'Agent').slice(0, 60);
   const key = `ak_${token(18)}`;
-  insert('accounts', { id: id('acc'), name, kind: 'agent', api_key: key, created_at: clock.now() });
-  json(res, 201, { name, api_key: key });
+  const kind = b.kind === 'business' ? 'business' : 'consumer';
+  insert('accounts', { id: id('acc'), name, kind, api_key: key, org: kind === 'business' ? { legal_name: name, employees: 5, auto_approve_max_cents: 30000 } : null, created_at: clock.now() });
+  json(res, 201, { name, kind, api_key: key });
+});
+// Demo controls: time travel to see scheduled work happen, and simulated no-shows.
+route('POST', '/api/ops/clock', ({ req, res, url, body }) => {
+  requireOps(req, url);
+  const b = parseJson(body);
+  let ms = Number(b.advance_ms ?? 0);
+  if (b.to === 'next_slot') {
+    const next = get("SELECT MIN(slot_start) AS t FROM jobs WHERE status IN ('assigned','dispatching','in_progress') AND slot_start > ?", clock.now());
+    if (!next?.t) throw new HttpError(409, 'no_upcoming_slot', 'Nessun lavoro programmato in arrivo');
+    ms = next.t - 40 * 60000 - clock.now();
+  }
+  if (!(ms > 0) || ms > 30 * 86400000) throw new HttpError(400, 'invalid_advance', 'advance_ms must be between 0 and 30 days');
+  clock.advance(ms);
+  emit('clock.changed', { data: { offset_ms: clockOffset(), now: iso(clock.now()) } });
+  tick();
+  json(res, 200, { now: iso(clock.now()), offset_ms: clockOffset() });
+});
+route('POST', '/api/ops/assignments/:id/no-show', ({ req, res, url, params }) => {
+  requireOps(req, url);
+  json(res, 200, markNoShow(params.id, 'ops_simulated'));
 });
 
 // ---------------------------------------------------------------- static
@@ -475,4 +520,4 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 `);
 }
 
-export { ACTIVE, publicWorker };
+export { publicWorker };

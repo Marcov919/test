@@ -21,19 +21,20 @@
 <body>
 <div class="wrap">
   <div class="row between"><a class="logo" href="/" style="text-decoration:none"><i></i>Aronica</a><span class="badge dark">Agent Connector</span></div>
-  <h1 style="margin-top:28px">Let your agent hire people in Milano</h1>
-  <p class="muted">One tool surface, four transports: <b>MCP</b> (Streamable HTTP + stdio), <b>REST</b>, <b>OpenAPI 3.1</b>, and <b>OpenAI/xAI function schemas</b>. Demo API key: <code>ak_demo_milano</code>. Base URL: <code data-base></code></p>
+  <h1 style="margin-top:28px">Let your agent book people in Milano</h1>
+  <p class="muted">One tool surface, four transports: <b>MCP</b> (Streamable HTTP + stdio), <b>REST</b>, <b>OpenAPI 3.1</b>, and <b>OpenAI/xAI function schemas</b>. Demo API keys: <code>ak_demo_milano</code> (personal assistant) and <code>ak_demo_business</code> (company agent). Base URL: <code data-base></code></p>
   <p class="toc small"><a href="#flow">Flow</a><a href="#claude">Claude</a><a href="#openai">OpenAI</a><a href="#grok">Grok</a><a href="#rest">REST</a><a href="#tools">Tools</a><a href="#honest">Fail-closed</a></p>
 
   <h2 id="flow">Flow</h2>
   <ol>
-    <li><code>list_skills</code> → what Aronica does (structured field proof only).</li>
-    <li><code>search_workers</code> → live supply near a place (optional).</li>
-    <li><code>create_job</code> → deadline, instructions, proof, budget. Returns <code>job_id</code> + <code>confirm_url</code>.</li>
-    <li><code>negotiate</code> (you drive the rounds) or <code>auto_negotiate</code> (Aronica's buyer agent within your budget). Supplier agents reply live: accept / counter / reject.</li>
-    <li><code>accept_quote</code> → deal locked for 10 minutes. <b>Send <code>confirm_url</code> to your human</b>: they tap <i>Conferma</i> (Now / Schedule). Agents negotiate; humans confirm.</li>
-    <li><code>wait_for_update</code> (long-poll) until <code>done</code>; read photos, GPS check and checklist answers from <code>get_job</code>; <code>rate_worker</code>.</li>
+    <li><code>compile_task</code> &rarr; turn the user's words ("sistemare il giardino sabato mattina, 80 mq con siepe" / "4 facchini venerd&igrave; 7-12 in Fiera") into a structured job: service, typed params, window, headcount, duration, <b>fixed price</b> with breakdown, proof, open questions. Confirm the open questions with your user.</li>
+    <li><code>create_job</code> &rarr; the job exists; fails closed if out of scope or nobody can do it.</li>
+    <li><code>negotiate</code> / <code>auto_negotiate</code> &rarr; A2A round on <b>when</b> (never on price): supplier agents check their partner's calendar and reply accept (start time, seats covered), counter (another slot) or decline.</li>
+    <li><code>accept_quote</code> &rarr; slot locked. <b>Consumers</b>: send <code>confirm_url</code> to your human (one tap). <b>Business accounts</b>: auto-approved under the company policy threshold and dispatched immediately.</li>
+    <li>Dispatch: one timed offer per open seat, highest score first, in parallel, with a per-supplier concentration cap; each person gets the right contract (PrestO, supplier invoice, or partner agency when caps are exceeded). No-shows are replaced automatically.</li>
+    <li><code>wait_for_update</code> until <code>done</code>; <code>get_job</code> for seats, contracts, proof (photos or check-in/check-out timesheet), escrow and invoice; <code>rate_worker</code>.</li>
   </ol>
+  <p class="small muted">Demo keys: <code>ak_demo_milano</code> (personal assistant, human confirms) &middot; <code>ak_demo_business</code> (Aurora Eventi, auto-approval up to &euro;600).</p>
 
   <h2 id="claude">Claude</h2>
   <h3>Claude Code</h3>
@@ -57,7 +58,7 @@
     "max_tokens": 16000,
     "mcp_servers": [{ "type": "url", "url": "https://YOUR-PUBLIC-HOST/mcp", "name": "aronica", "authorization_token": "ak_demo_milano" }],
     "tools": [{ "type": "mcp_toolset", "mcp_server_name": "aronica" }],
-    "messages": [{ "role": "user", "content": "Is Barilla pesto on shelf at Esselunga Corso Vittorio Emanuele? Budget 15-22 EUR, within 2 hours." }]
+    "messages": [{ "role": "user", "content": "Plan my week. The garden needs sorting (about 80 m2, with a hedge); Saturday morning works, I live near Navigli." }]
   }'</code></pre>
   <p class="small muted">Set <code>ARONICA_PUBLIC_URL</code> on the server so <code>confirm_url</code> links point at your public host.</p>
 
@@ -67,7 +68,7 @@
   "model": "&lt;your model&gt;",
   "tools": [{ "type": "mcp", "server_label": "aronica", "server_url": "https://YOUR-PUBLIC-HOST/mcp",
               "headers": { "Authorization": "Bearer ak_demo_milano" }, "require_approval": "never" }],
-  "input": "Get a person to photograph the storefront at Via Brera 12 within 3 hours."
+  "input": "We need 4 movers at Fiera Milano Rho next Friday 7-12 for our stand set-up."
 }</code></pre>
   <h3>Custom GPT Actions</h3>
   <p>Import <code><span data-base></span>/openapi.json</code>, auth type <i>API key → Bearer</i> with <code>ak_demo_milano</code>.</p>
@@ -77,15 +78,11 @@
 
   <h2 id="rest">REST</h2>
   <pre><code>B=<span data-base></span>; K="Authorization: Bearer ak_demo_milano"
-curl -s -X POST $B/v1/jobs -H "$K" -H 'content-type: application/json' -d '{
-  "title": "Is Barilla Pesto alla Genovese 190g on shelf?",
-  "location": { "address": "Esselunga, Corso Vittorio Emanuele" },
-  "deadline_minutes": 120,
-  "instructions": ["Go to the sauces aisle", "Photograph the full pesto bay", "Close-up of the price tag"],
-  "budget": { "target_eur": 14, "max_eur": 22 },
-  "agent_name": "Claude"
-}'
-curl -s -X POST $B/v1/jobs/JOB_ID/negotiate -H "$K" -H 'content-type: application/json' -d '{"offer_eur": 15}'
+curl -s -X POST $B/v1/tasks/compile -H "$K" -H 'content-type: application/json' \
+  -d '{"text": "sistemare il giardino sabato mattina, circa 80 mq con la siepe, zona Navigli"}'
+curl -s -X POST $B/v1/jobs -H "$K" -H 'content-type: application/json' \
+  -d '{"text": "sistemare il giardino sabato mattina, circa 80 mq con la siepe, zona Navigli", "agent_name": "Claude"}'
+curl -s -X POST $B/v1/jobs/JOB_ID/negotiate -H "$K" -H 'content-type: application/json' -d '{}'
 curl -s -X POST $B/v1/jobs/JOB_ID/accept-quote -H "$K" -H 'content-type: application/json' -d '{"quote_id": "q_..."}'
 curl -s "$B/v1/jobs/JOB_ID/events?since_seq=0&amp;timeout_s=20" -H "$K"      # long-poll
 curl -N "$B/v1/jobs/JOB_ID/events" -H "$K" -H "Accept: text/event-stream"  # SSE</code></pre>
@@ -95,7 +92,7 @@ curl -N "$B/v1/jobs/JOB_ID/events" -H "$K" -H "Accept: text/event-stream"  # SSE
   <table id="toolsTable"><tr><th>Tool</th><th>HTTP</th><th>What it does</th></tr></table>
 
   <h2 id="honest">Fail-closed, honestly</h2>
-  <p>Aronica v1 only dispatches structured field proof in Milano. Lifestyle services (Capoeira teacher, nails, dentist…), other cities, unknown skills, or zero available verified workers return an error with this exact message, and no one is promised anything:</p>
+  <p>Aronica dispatches only the services in <code>list_services</code>, only in Milano. Lessons, beauty, medical, certified plumbing or electrical work (Capoeira teacher, nails, dentist…), other cities, or zero available verified partners return an error with this exact message, and no one is promised anything:</p>
   <pre><code>Siamo spiacenti ma al momento non abbiamo persone sufficienti a soddisfare la richiesta.</code></pre>
   <p class="small muted">Error codes: <code>unsupported_task</code>, <code>unsupported_skill</code>, <code>unsupported_city</code>, <code>outside_service_area</code> (422); <code>no_supply</code> (409).</p>
 </div>

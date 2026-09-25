@@ -5,28 +5,33 @@ import { dirname } from 'node:path';
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
-CREATE TABLE IF NOT EXISTS skills (
+CREATE TABLE IF NOT EXISTS services (
   code TEXT PRIMARY KEY,
+  segment TEXT NOT NULL,            -- casa | business
   name_it TEXT NOT NULL,
   name_en TEXT NOT NULL,
   description TEXT NOT NULL,
-  base_price_cents INTEGER NOT NULL,
-  typical_minutes INTEGER NOT NULL,
-  default_proof TEXT NOT NULL,
-  keywords TEXT NOT NULL
+  params TEXT NOT NULL,             -- json: typed parameter schema
+  proof TEXT NOT NULL,              -- json: { kind: photos|timesheet, ... }
+  instructions TEXT NOT NULL,       -- json
+  keywords TEXT NOT NULL,           -- json
+  flexible INTEGER NOT NULL DEFAULT 1,   -- start time can float inside the window
+  multi_seat INTEGER NOT NULL DEFAULT 0, -- headcount > 1 (shifts)
+  mentions_ok INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS accounts (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
-  kind TEXT NOT NULL,              -- 'agent' | 'console'
+  kind TEXT NOT NULL,               -- consumer | business
   api_key TEXT UNIQUE,
+  org TEXT,                         -- json: business profile + approval policy
   created_at INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS workers (
   id TEXT PRIMARY KEY,
-  kind TEXT NOT NULL,              -- 'person' | 'business'
+  kind TEXT NOT NULL,               -- person | business
   display_name TEXT NOT NULL,
   legal_name TEXT,
   vat_id TEXT,
@@ -35,15 +40,17 @@ CREATE TABLE IF NOT EXISTS workers (
   zone TEXT,
   lat REAL NOT NULL,
   lng REAL NOT NULL,
-  vehicle TEXT NOT NULL,           -- walk | bike | scooter | car
-  skills TEXT NOT NULL,            -- json array of skill codes
-  skill_jobs TEXT NOT NULL,        -- json {skill: completed count}
-  rate_multiplier REAL NOT NULL DEFAULT 1,
-  capacity INTEGER NOT NULL DEFAULT 1,
+  vehicle TEXT NOT NULL,
+  skills TEXT NOT NULL,             -- json array of service codes
+  skill_jobs TEXT NOT NULL,         -- json {service: completed count}
+  availability TEXT NOT NULL,       -- json {dow: [[startMin, endMin], ...]} Europe/Rome
+  min_hourly_cents INTEGER NOT NULL DEFAULT 1200,
+  capacity INTEGER NOT NULL DEFAULT 1, -- crew size for businesses
+  insured INTEGER NOT NULL DEFAULT 0,
   online INTEGER NOT NULL DEFAULT 0,
   verified INTEGER NOT NULL DEFAULT 0,
   verification_note TEXT,
-  status TEXT NOT NULL,            -- active | pending_verification | suspended
+  status TEXT NOT NULL,             -- active | pending_verification | suspended
   tier TEXT NOT NULL DEFAULT 'good',
   tier_reasons TEXT NOT NULL DEFAULT '[]',
   offers_received INTEGER NOT NULL DEFAULT 0,
@@ -56,7 +63,7 @@ CREATE TABLE IF NOT EXISTS workers (
   no_shows INTEGER NOT NULL DEFAULT 0,
   earnings_cents INTEGER NOT NULL DEFAULT 0,
   avatar_color TEXT,
-  simulated INTEGER NOT NULL DEFAULT 0, -- seed persona the demo simulator may drive
+  simulated INTEGER NOT NULL DEFAULT 0,
   token TEXT UNIQUE,
   joined_at INTEGER NOT NULL
 );
@@ -68,7 +75,7 @@ CREATE TABLE IF NOT EXISTS ratings (
   stars INTEGER NOT NULL,
   tags TEXT NOT NULL DEFAULT '[]',
   comment TEXT,
-  excluded INTEGER NOT NULL DEFAULT 0,  -- 1 = not the worker's fault, does not count
+  excluded INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ratings_worker ON ratings(worker_id, created_at);
@@ -78,50 +85,69 @@ CREATE TABLE IF NOT EXISTS jobs (
   account_id TEXT NOT NULL,
   agent_name TEXT,
   city TEXT NOT NULL,
-  skill TEXT NOT NULL,
+  service TEXT NOT NULL,
   title TEXT NOT NULL,
-  description TEXT,
-  instructions TEXT NOT NULL,      -- json array
-  proof_req TEXT NOT NULL,         -- json
+  request_text TEXT,
+  params TEXT NOT NULL,
+  instructions TEXT NOT NULL,
+  proof_req TEXT NOT NULL,
   address TEXT,
   lat REAL NOT NULL,
   lng REAL NOT NULL,
-  deadline_at INTEGER NOT NULL,
-  scheduled_at INTEGER,
-  mode TEXT,                       -- now | schedule
-  budget_target_cents INTEGER,
-  budget_max_cents INTEGER,
+  window_start INTEGER NOT NULL,
+  window_end INTEGER NOT NULL,
+  flexible INTEGER NOT NULL DEFAULT 0,
+  slot_start INTEGER,
+  duration_min INTEGER NOT NULL,
+  headcount INTEGER NOT NULL DEFAULT 1,
+  seats_filled INTEGER NOT NULL DEFAULT 0,
+  price TEXT NOT NULL,              -- json quote (lines, surcharges, total, fee, payouts)
+  max_price_cents INTEGER,
   status TEXT NOT NULL,
   status_message TEXT,
   confirm_token TEXT NOT NULL,
-  deal TEXT,                       -- json
-  dispatch_pool TEXT,              -- json array of worker ids (ranked)
+  approval TEXT,                    -- json {by: human|policy, at, rule}
+  deal TEXT,                        -- json (chosen slot + lead supplier)
+  dispatch_pool TEXT,
   dispatch_index INTEGER NOT NULL DEFAULT -1,
-  assigned_worker_id TEXT,
-  assigned_via TEXT,               -- 'app' (a human tapped Accetto) | 'sim'
-  assigned_at INTEGER,
+  escrow TEXT,
+  invoice TEXT,
+  negotiation_round INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  completed_at INTEGER,
+  cancelled_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status);
+
+CREATE TABLE IF NOT EXISTS assignments (
+  id TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL,
+  worker_id TEXT NOT NULL,
+  crew INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL,             -- assigned | en_route | on_site | done | cancelled | no_show
+  contract TEXT,                    -- json
+  payout_cents INTEGER NOT NULL,
+  assigned_via TEXT,
+  assigned_at INTEGER NOT NULL,
   started_at INTEGER,
   arrived_at INTEGER,
   completed_at INTEGER,
-  cancelled_at INTEGER,
-  escrow TEXT,                     -- json
-  proof TEXT,                      -- json
+  proof TEXT,
   buyer_rating INTEGER,
-  worker_rating_of_buyer INTEGER,
-  negotiation_round INTEGER NOT NULL DEFAULT 0,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  worker_rating_of_buyer INTEGER
 );
-CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status);
+CREATE INDEX IF NOT EXISTS assignments_job ON assignments(job_id);
+CREATE INDEX IF NOT EXISTS assignments_worker ON assignments(worker_id, status);
 
 CREATE TABLE IF NOT EXISTS quotes (
   id TEXT PRIMARY KEY,
   job_id TEXT NOT NULL,
   round INTEGER NOT NULL,
   worker_id TEXT NOT NULL,
-  buyer_offer_cents INTEGER,
-  action TEXT NOT NULL,            -- counter | accept | reject
-  price_cents INTEGER,
+  action TEXT NOT NULL,             -- accept | counter | decline
+  slot_start INTEGER,
+  seats INTEGER NOT NULL DEFAULT 1,
   eta_min INTEGER,
   message TEXT,
   created_at INTEGER NOT NULL
@@ -134,9 +160,9 @@ CREATE TABLE IF NOT EXISTS offers (
   worker_id TEXT NOT NULL,
   rank INTEGER NOT NULL,
   score REAL NOT NULL,
-  price_cents INTEGER NOT NULL,
-  eta_min INTEGER,
-  status TEXT NOT NULL,            -- pending | accepted | declined | expired | cancelled
+  seats INTEGER NOT NULL DEFAULT 1,
+  payout_cents INTEGER NOT NULL,
+  status TEXT NOT NULL,             -- pending | accepted | declined | expired | cancelled
   created_at INTEGER NOT NULL,
   expires_at INTEGER NOT NULL,
   responded_at INTEGER
@@ -157,8 +183,8 @@ CREATE INDEX IF NOT EXISTS events_job ON events(job_id, seq);
 `;
 
 const JSON_COLS = new Set([
-  'skills', 'skill_jobs', 'tier_reasons', 'tags', 'instructions', 'proof_req', 'deal',
-  'dispatch_pool', 'escrow', 'proof', 'data', 'default_proof', 'keywords',
+  'skills', 'skill_jobs', 'tier_reasons', 'tags', 'instructions', 'proof_req', 'deal', 'params', 'price', 'approval',
+  'dispatch_pool', 'escrow', 'proof', 'data', 'keywords', 'availability', 'org', 'contract', 'invoice',
 ]);
 
 export let db = null;

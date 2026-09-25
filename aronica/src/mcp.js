@@ -5,11 +5,11 @@ import { TOOLS, callTool } from './connector.js';
 import { HttpError, token } from './util.js';
 
 const SUPPORTED = ['2025-06-18', '2025-03-26', '2024-11-05'];
-export const SERVER_INFO = { name: 'aronica', title: 'Aronica — hire verified people in Milano', version: '0.1.0' };
+export const SERVER_INFO = { name: 'aronica', title: 'Aronica — hire verified people in Milano', version: '0.2.0' };
 
-const INSTRUCTIONS = `Aronica dispatches verified people in Milano for physical field-proof tasks (shelf checks, store photos, price audits, on-site presence, property checks, document pickup, mystery shopping, event/installation checks).
-Flow: list_skills → (search_workers) → create_job → negotiate / auto_negotiate → accept_quote → give confirm_url to your human (they confirm Now or Schedule) → wait_for_update until status "done" → read proof in get_job → rate_worker.
-Unsupported tasks, other cities, or no available workers fail closed with an honest message. Never promise the user a worker before status is "assigned".`;
+const INSTRUCTIONS = `Aronica dispatches verified people and small businesses in Milano for physical work: home services a personal assistant plans (gardening, furniture assembly, handyman, cleaning, waiting at home for a technician/courier, errands with purchase) and one-shot business work (load-in crews and event staff at Fiera Rho/MiCo, short-let turnover, photo inspections, retail checks).
+Flow: compile_task (turn the user's words into a structured job with a FIXED price and open questions; confirm them with the user) → create_job → negotiate / auto_negotiate (supplier agents reply on WHEN: accept, counter-slot, decline) → accept_quote → consumer: give confirm_url to your human · business: auto-approved under the company policy → wait_for_update → get_job (seats, contracts, proof, invoice) → rate_worker.
+Out-of-scope or no available partners fail closed with an honest message. Never promise a person before seats are filled.`;
 
 function rpcResult(idv, result) { return { jsonrpc: '2.0', id: idv, result }; }
 function rpcError(idv, code, message, data) { return { jsonrpc: '2.0', id: idv ?? null, error: { code, message, ...(data ? { data } : {}) } }; }

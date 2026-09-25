@@ -2,7 +2,7 @@
 // button, full-screen timed offers with Accetto / Rifiuto, guided proof capture.
 import {
   h, mount, api, sse, eur, pct, hhmm, dayhhmm, deadlineText, toast, icon, avatar, vehicleIcon, VEHICLE_IT,
-  ring, createMap, taskPin, mePin, twoStep,
+  ring, createMap, taskPin, mePin, twoStep, serverNow, setClockOffset,
 } from './common.js';
 
 let root;
@@ -27,10 +27,14 @@ const hdr = () => ({ 'X-Worker-Token': token });
 const wapi = (path, opts = {}) => api(path, { ...opts, headers: { ...hdr(), ...(opts.headers ?? {}) } });
 
 // ------------------------------------------------------------------ boot
-export async function mountWorker(el, { autoLogin = null, demo: isDemo = false } = {}) {
+export const phoneBusy = () => !!(shownOffer || me?.active_jobs?.length);
+
+export async function mountWorker(el, { autoLogin = null, demo: isDemo = false, token: tk = null } = {}) {
   root = el;
   demo = isDemo;
+  if (tk) { token = tk; es?.close(); clearInterval(pollTimer); root.replaceChildren(); map = null; shownOffer = null; closeOverlay(); }
   cfg = await api('/api/config');
+  setClockOffset(cfg.clock_offset_ms);
   if (!token && autoLogin) {
     try {
       token = (await api('/api/worker/login', { method: 'POST', body: { worker_id: autoLogin } })).token;
@@ -62,6 +66,10 @@ function refreshSoon() {
 
 async function refresh() {
   me = await wapi('/api/worker/me');
+  me.active_jobs = me.active_jobs.map((j) => ({
+    ...j, job_status: j.status, status: j.assignment.status, status_label: j.assignment.status_label,
+    skill_name: j.service_name, contract: j.assignment.contract, crew: j.assignment.crew,
+  }));
   renderApp();
   const offer = me.offers[0];
   if (offer && (!shownOffer || shownOffer.offer_id !== offer.offer_id)) showOffer(offer);
@@ -77,6 +85,7 @@ function onEvent(e) {
     updateLiveBits();
     return;
   }
+  if (e.type === 'clock.changed') { setClockOffset(e.data.offset_ms); refreshSoon(); return; }
   if (e.type === 'dispatch.offer_sent') {
     if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
     showOffer(e.data);
@@ -85,7 +94,7 @@ function onEvent(e) {
     closeOffer();
     toast('Offerta scaduta: passata al prossimo partner');
   }
-  if (e.type === 'job.done' && e.worker_id === me?.worker.id && !doneShown.has(e.job_id)) {
+  if (e.type === 'assignment.done' && e.worker_id === me?.worker.id && !doneShown.has(e.job_id)) {
     doneShown.add(e.job_id);
     showDone(e.data.payout_cents, e.job_id);
   }
@@ -157,8 +166,8 @@ function renderSignup() {
         h('select.input', { id: 'su_zone' }, cfg.places.map((p) => h('option', { value: p.name }, p.name)))),
       h('label.field', {}, h('span', {}, 'Mezzo'),
         h('select.input', { id: 'su_vehicle' }, Object.entries(VEHICLE_IT).map(([k, v]) => h('option', { value: k, selected: k === 'bike' }, v)))),
-      h('div.field', {}, h('span', {}, 'Competenze (solo lavori di verifica sul campo)'),
-        h('div.chips', {}, cfg.skills.map((s) => h('button.chip', {
+      h('div.field', {}, h('span', {}, 'Servizi che offri'),
+        h('div.chips', {}, cfg.services.map((s) => h('button.chip', {
           class: skills.has(s.code) ? 'on' : '',
           onclick: () => { skills.has(s.code) ? skills.delete(s.code) : skills.add(s.code); draw(); },
         }, s.name_it)))),
@@ -314,7 +323,7 @@ function showOffer(o) {
   const exp = new Date(o.expires_at).getTime();
   const ringBox = h('div');
   const tickRing = () => {
-    const left = (exp - Date.now()) / 1000;
+    const left = (exp - serverNow()) / 1000;
     mount(ringBox, ring(left, o.ttl_s, 68));
     if (left <= 0) { closeOffer(); toast('Offerta scaduta'); }
   };
@@ -323,7 +332,7 @@ function showOffer(o) {
     try {
       await wapi(`/api/worker/offers/${o.offer_id}/${accept ? 'accept' : 'decline'}`, { method: 'POST' });
       closeOffer();
-      if (accept) { focusJobId = o.job_id; toast('Lavoro accettato'); }
+      if (accept) { focusJobId = o.job_id; toast('Lavoro accettato: trovi il contratto nei dettagli'); }
       await refresh();
     } catch (e) { toast(e.message, true); closeOffer(); refresh(); }
   };
@@ -331,14 +340,14 @@ function showOffer(o) {
   const panel = h('div.panel', {},
     h('div.row.between', { style: { alignItems: 'flex-start' } },
       h('div', {},
-        h('span.badge.blue', {}, o.skill_name),
+        h('div.row', { style: { gap: '6px' } }, h('span.badge.blue', {}, o.service_name), o.segment === 'business' ? h('span.badge', {}, 'Azienda') : h('span.badge', {}, 'Privato')),
         h('div.offer-pay.num', { style: { marginTop: '10px' } }, eur(o.pay_cents)),
-        h('div.small.muted', {}, 'Compenso netto per te')),
+        h('div.small.muted', {}, o.seats > 1 ? `Compenso per ${o.seats} persone della tua squadra` : 'Compenso netto per te')),
       ringBox),
     h('div.offer-meta', { style: { margin: '14px 0' } },
-      h('span', {}, icon('clock'), `${o.eta_min} min`),
+      h('span', {}, icon('calendar'), o.slot_label),
       h('span', {}, icon('route'), `${String(o.distance_km).replace('.', ',')} km`),
-      h('span', {}, o.mode === 'schedule' ? icon('calendar') : icon('bolt'), o.mode === 'schedule' ? `Programmato ${dayhhmm(o.scheduled_at)}` : deadlineText(o.deadline_at))),
+      o.headcount > 1 ? h('span', {}, icon('user'), o.seats > 1 ? `${o.seats} posti su ${o.headcount}` : `1 posto su ${o.headcount}`) : null),
     h('h3', {}, o.title),
     h('div.row.small.muted', { style: { marginTop: '4px' } }, icon('pin'), o.address),
     h('div.sep'),
@@ -346,10 +355,7 @@ function showOffer(o) {
     h('ol.steps-list', { style: { margin: '8px 0 12px' } }, o.instructions.map((s) => h('li', {}, s))),
     h('div.xs.faint', { style: { textTransform: 'uppercase', letterSpacing: '.06em', fontWeight: 700 } }, 'Prova richiesta'),
     h('div.req', { style: { margin: '8px 0 16px' } },
-      h('span.badge', {}, icon('camera'), `${p.photos_min} foto`),
-      h('span.badge', {}, icon('pin'), `GPS entro ${p.gps_radius_m} m`),
-      h('span.badge', {}, icon('list'), `${p.checklist.length} domande`),
-      h('span.badge', {}, icon('clock'), `Entro ${hhmm(o.deadline_at)}`)),
+      ...proofBadges(p)),
     h('div.small.faint', { style: { marginBottom: '12px' } }, `Richiesto da ${o.buyer} · offerta #${o.rank} in coda`),
     h('div.row', {},
       h('button.btn.lg', { style: { flex: '1' }, onclick: (e) => answer(false, e.currentTarget) }, 'Rifiuto'),
@@ -357,6 +363,12 @@ function showOffer(o) {
   openOverlay(h('div.w-overlay', {}, panel), 'offer');
   tickRing();
   offerTimer = setInterval(tickRing, 250);
+}
+
+function proofBadges(p) {
+  return p.kind === 'timesheet'
+    ? [h('span.badge', {}, icon('clock'), 'Check-in e check-out'), h('span.badge', {}, icon('pin'), `GPS entro ${p.gps_radius_m} m`)]
+    : [h('span.badge', {}, icon('camera'), `${p.photos_min} foto`), h('span.badge', {}, icon('pin'), `GPS entro ${p.gps_radius_m} m`), h('span.badge', {}, icon('list'), `${p.checklist.length} domande`)];
 }
 
 function closeOffer() {
@@ -384,17 +396,23 @@ function renderJobSheet(job) {
   const w = me.worker;
   const dist = job._remaining_m ?? Math.round(haversine(w, job.location));
   const inside = dist <= job.proof_requirements.gps_radius_m;
+  const timesheet = job.proof_requirements.kind === 'timesheet';
+  const startsIn = Math.round((new Date(job.slot?.start).getTime() - serverNow()) / 60000);
   const act = async (action, body) => {
     try { await wapi(`/api/worker/jobs/${job.id}/${action}`, { method: 'POST', body }); await refresh(); } catch (e) { toast(e.message, true); }
   };
   let primary;
   if (job.status === 'assigned') {
-    primary = h('button.btn.primary.lg.block', { onclick: () => act('start') }, icon('route'), job.mode === 'schedule' ? 'Inizia (sto andando)' : 'Vado ora');
+    primary = h('div.col', { style: { gap: '6px' } },
+      h('button.btn.primary.lg.block', { onclick: () => act('start') }, icon('route'), startsIn > 90 ? 'Parti ora (in anticipo)' : 'Sto partendo'),
+      startsIn > 90 ? h('div.xs.faint.center', {}, `Inizia tra ${startsIn > 1440 ? `${Math.round(startsIn / 1440)} giorni` : `${Math.round(startsIn / 60)} ore`}. Demo: puoi partire subito, oppure avanza l'orologio in Ops.`) : null);
   } else if (job.status === 'en_route') {
     primary = h('button.btn.primary.lg.block', { id: 'arriveBtn', disabled: !inside, onclick: () => act('arrive') },
-      icon('pin'), inside ? 'Sono arrivato' : `Mancano ${fmtDist(dist)}`);
+      icon('pin'), inside ? (timesheet ? 'Check-in: sono arrivato' : 'Sono arrivato') : `Mancano ${fmtDist(dist)}`);
   } else if (job.status === 'on_site') {
-    primary = h('button.btn.go.lg.block', { onclick: () => showProof(job) }, icon('camera'), 'Carica la prova');
+    primary = timesheet
+      ? h('button.btn.go.lg.block', { onclick: () => showProof(job) }, icon('clock'), 'Termina turno · check-out')
+      : h('button.btn.go.lg.block', { onclick: () => showProof(job) }, icon('camera'), 'Carica la prova');
   }
   const tabs = me.active_jobs.length > 1
     ? h('div.chips', { style: { marginBottom: '10px' } }, me.active_jobs.map((j, i) => h('button.chip', { class: j.id === job.id ? 'on' : '', onclick: () => { focusJobId = j.id; renderApp(); } }, `Lavoro ${i + 1} · ${j.status_label}`)))
@@ -406,19 +424,18 @@ function renderJobSheet(job) {
       h('div', {}, h('div.small.muted', {}, job.status_label), h('h2', {}, job.title)),
       h('div', { style: { textAlign: 'right' } }, h('div.num', { style: { fontWeight: 800, fontSize: '22px' } }, eur(job.pay_cents)), h('div.xs.faint', {}, 'compenso'))),
     h('div.row.small.muted', { style: { margin: '8px 0' } }, icon('pin'), job.location.address),
-    h('div.row.small', { style: { marginBottom: '12px', gap: '14px' } },
-      job.mode === 'schedule' ? h('span.row', {}, icon('calendar'), `Programmato ${dayhhmm(job.scheduled_at)}`) : null,
-      h('span.row', {}, icon('clock'), deadlineText(job.deadline_at)),
+    h('div.row.small.wrap', { style: { marginBottom: '12px', gap: '10px' } },
+      h('span.row', {}, icon('calendar'), job.slot?.label ?? job.window.label),
+      job.headcount > 1 ? h('span.badge', {}, `${job.crew > 1 ? `${job.crew} posti` : '1 posto'} su ${job.headcount}`) : null,
+      job.contract ? h('span.badge.blue', {}, job.contract.label) : null,
       job.status === 'en_route' ? h('span.row', { id: 'liveDist' }, icon('route'), fmtDist(dist)) : null),
     job.status === 'en_route' ? h('div.xs.faint', { style: { marginBottom: '8px' } }, w.real_gps ? 'GPS reale del dispositivo' : 'Navigazione simulata (demo): la posizione si muove verso il luogo') : null,
     primary,
     h('details', { style: { marginTop: '14px' } },
       h('summary.small', { style: { cursor: 'pointer', fontWeight: 600 } }, 'Istruzioni e prova richiesta'),
       h('ol.steps-list', { style: { margin: '10px 0' } }, job.instructions.map((s) => h('li.small', {}, s))),
-      h('div.req', {},
-        h('span.badge', {}, icon('camera'), `${job.proof_requirements.photos_min} foto`),
-        h('span.badge', {}, icon('pin'), `GPS ${job.proof_requirements.gps_radius_m} m`),
-        ...job.proof_requirements.checklist.map((c) => h('span.badge', {}, c.q)))),
+      h('div.req', {}, ...proofBadges(job.proof_requirements)),
+      job.contract ? h('pre.small', { style: { whiteSpace: 'pre-wrap', background: 'var(--bg-2)', padding: '10px', borderRadius: '10px', marginTop: '10px', fontFamily: 'inherit' } }, job.contract.text) : null),
     ['assigned', 'en_route'].includes(job.status)
       ? h('div.center', { style: { marginTop: '14px' } }, h('button.linkbtn', {
         onclick: twoStep('Tocca di nuovo: il lavoro torna in coda e peggiora il tuo tasso di cancellazione', () => act('cancel', { reason: 'worker_cancel' })),
@@ -514,19 +531,27 @@ function showProof(job) {
       btn.disabled = false;
     }
   };
+  const timesheet = req.kind === 'timesheet';
+  const checkIn = job.assignment?.arrived_at ? new Date(job.assignment.arrived_at).getTime() : null;
+  const worked = checkIn ? Math.max(0, Math.round((serverNow() - checkIn) / 60000)) : 0;
   const panel = h('div.panel', {},
-    h('div.row.between', {}, h('button.w-iconbtn', { onclick: closeOverlay, style: { boxShadow: 'none', background: 'var(--bg-2)' } }, icon('back')), h('b', {}, 'Prova'), h('span', { style: { width: '46px' } })),
+    h('div.row.between', {}, h('button.w-iconbtn', { onclick: closeOverlay, style: { boxShadow: 'none', background: 'var(--bg-2)' } }, icon('back')), h('b', {}, timesheet ? 'Fine turno' : 'Prova'), h('span', { style: { width: '46px' } })),
     h('h2', { style: { margin: '14px 0 4px' } }, job.title),
-    h('div.small.muted', {}, 'La prova viene verificata automaticamente: numero di foto, posizione GPS, orario e risposte.'),
-    h('div.row.between', { style: { margin: '18px 0 8px' } }, h('h3', {}, 'Foto'), counter),
-    grid, fileIn,
-    h('h3', { style: { margin: '18px 0 8px' } }, 'Checklist'),
+    h('div.small.muted', {}, timesheet
+      ? 'Il check-out registra l\'orario e la posizione: le ore lavorate finiscono nel contratto e nel pagamento.'
+      : 'La prova viene verificata automaticamente: numero di foto, posizione GPS, orario e risposte.'),
+    timesheet ? h('div.grid2', { style: { margin: '16px 0' } },
+      h('div.stat', {}, h('b.num', {}, checkIn ? hhmm(job.assignment.arrived_at) : '—'), h('span', {}, 'Check-in')),
+      h('div.stat', {}, h('b.num', {}, `${Math.floor(worked / 60)}h ${worked % 60}m`), h('span', {}, `Lavorate (previste ${job.duration_label})`))) : null,
+    timesheet ? null : h('div.row.between', { style: { margin: '18px 0 8px' } }, h('h3', {}, 'Foto'), counter),
+    timesheet ? null : grid, fileIn,
+    h('h3', { style: { margin: '18px 0 8px' } }, timesheet ? 'Note' : 'Checklist'),
     h('div.col', { style: { gap: '14px' } }, req.checklist.map(q)),
     h('div.req', { style: { margin: '16px 0' } },
       h('span.badge.green', {}, icon('pin'), 'Posizione rilevata sul posto'),
-      h('span.badge', {}, icon('clock'), `Scadenza ${hhmm(job.deadline_at)}`)),
+      h('span.badge', {}, icon('calendar'), job.slot?.label ?? '')),
     errors,
-    h('button.btn.go.lg.block', { style: { marginTop: '10px' }, onclick: (e) => submit(e.currentTarget) }, 'Invia prova'));
+    h('button.btn.go.lg.block', { style: { marginTop: '10px' }, onclick: (e) => submit(e.currentTarget) }, timesheet ? 'Check-out' : 'Invia prova'));
   drawPhotos();
   openOverlay(h('div.w-overlay.full', {}, panel), 'proof');
 }
@@ -574,6 +599,10 @@ function showProfile() {
     h('div.grid2', {},
       h('div.stat', {}, h('b.num', {}, eur(w.earnings_cents)), h('span', {}, 'Guadagni totali')),
       h('div.stat', {}, h('b.num', {}, w.jobs_completed), h('span', {}, 'Lavori completati'))),
+    h('h3', { style: { margin: '20px 0 10px' } }, 'Disponibilità e tariffa'),
+    h('div.small.muted', {}, availabilityText(w.availability)),
+    h('div.small.muted', { style: { marginTop: '4px' } }, `Tariffa minima: ${eur(w.min_hourly_cents)}/h · ${w.kind === 'business' ? `squadra di ${w.capacity}` : 'singolo'}${w.insured ? ' · RC assicurata' : ''}`),
+    h('div.chips', { style: { marginTop: '8px' } }, w.skills.map((code) => h('span.badge', {}, cfg.services.find((x) => x.code === code)?.name_it ?? code))),
     h('h3', { style: { margin: '20px 0 10px' } }, 'Affidabilità'),
     r.reasons.length ? h('div.w-banner', { class: r.tier === 'suspended' ? 'red' : 'warn', style: { marginBottom: '10px' } }, icon('alert'), r.reasons.join(' · ')) : null,
     h('div.col', { style: { gap: '12px' } },
@@ -596,7 +625,7 @@ function showProfile() {
       h('div.grow.small', {}, rv.tags.join(', ') || '—', rv.comment ? h('div.muted', {}, `"${rv.comment}"`) : null, rv.excluded ? h('div.xs.faint', {}, 'Esclusa dalla media (non dipendeva da te)') : null)))) : h('div.small.muted', {}, 'Nessuna recensione su Aronica ancora.'),
     h('h3', { style: { margin: '20px 0 8px' } }, 'Storico'),
     me.history.length ? h('div.list', {}, me.history.map((j) => h('div.item', {},
-      h('div.grow', {}, h('div.small', {}, j.title), h('div.xs.faint', {}, `${dayhhmm(j.completed_at)} · ${j.status}`)),
+      h('div.grow', {}, h('div.small', {}, j.title), h('div.xs.faint', {}, `${dayhhmm(j.completed_at)} · ${j.status}${j.contract ? ` · ${j.contract}` : ''}`)),
       h('b.num', { style: { color: j.pay_cents ? 'var(--accent)' : 'var(--fg-3)' } }, j.pay_cents ? `+${eur(j.pay_cents)}` : '—')))) : h('div.small.muted', {}, 'Nessun lavoro ancora.'),
     demo ? null : h('h3', { style: { margin: '20px 0 8px' } }, 'Posizione'),
     demo ? null : h('label.row.small', {},
@@ -607,6 +636,15 @@ function showProfile() {
     h('div.sep'),
     h('button.btn.block', { onclick: () => { closeOverlay(); logout(); } }, 'Esci'));
   openOverlay(h('div.w-overlay.full', {}, panel), 'profile');
+}
+
+const DOW = ['Dom', 'Lun', 'Mar', 'Mer', 'Gio', 'Ven', 'Sab'];
+function availabilityText(av = {}) {
+  const hh = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+  const days = [1, 2, 3, 4, 5, 6, 0].filter((d) => av[d]?.length);
+  if (!days.length) return 'Nessuna disponibilità impostata';
+  const r = av[days[0]].map(([a, b]) => `${hh(a)}–${hh(b)}`).join(', ');
+  return `${days.map((d) => DOW[d]).join(' ')} · ${r}`;
 }
 
 function toggleRealGps(on) {

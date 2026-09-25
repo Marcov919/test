@@ -1,148 +1,152 @@
-// Dispatch: human confirm → timed offer to #1 → cascade → assigned → on site →
-// proof → done. Uber, not lead-gen: once confirmed, the platform keeps offering
-// until someone accepts or the pool is honestly exhausted.
+// Dispatch v2: approval → timed offers for every open seat (parallel, highest
+// score first) → assignments with the right contract → check-in / proof →
+// Done → escrow release + invoice. The guarantee layer: no-shows are detected
+// and the seat is re-dispatched automatically; partial coverage is reported
+// honestly, never hidden.
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { get, all, insert, update, tx, getSetting } from './db.js';
 import { emit, realGps } from './events.js';
-import { rankCandidates, scoreWorker, activeJobCount } from './matching.js';
-import { getSkill } from './skills.js';
+import { rankCandidates, scoreWorker, freeCapacity, maxSeatsPerSupplier } from './matching.js';
+import { getService } from './services.js';
 import { haversineKm } from './geo.js';
 import { enforce } from './reliability.js';
-import { ACTIVE, loadJob, publicWorker } from './jobs.js';
+import { routeContract, contractText } from './compliance.js';
+import { loadJob, publicWorker, serializeAssignment } from './jobs.js';
+import { slotLabel, romeParts } from './time.js';
 import { HttpError, clock, id, iso, token, eur, NO_SUPPLY_IT } from './util.js';
 
 export const UPLOAD_DIR = () => process.env.ARONICA_UPLOADS || join(process.cwd(), 'data', 'uploads');
 const offerTtlMs = () => getSetting('offer_ttl_s', 20) * 1000;
+const NO_SHOW_GRACE_MS = 20 * 60000;
 
-// ---- human confirm (Now / Schedule) --------------------------------------
-export function confirmJob(jobId, { mode = 'now', scheduled_at = null } = {}) {
+// ---- approval (human tap or business policy) --------------------------------
+export function confirmJob(jobId, approval = { by: 'human' }) {
   const job = loadJob(jobId);
   if (job.status !== 'pending_confirmation') throw new HttpError(409, 'not_pending_confirmation', `Job is ${job.status}.`);
   const now = clock.now();
-  if (job.deal.valid_until < now) {
-    update('jobs', jobId, { status: 'expired', status_message: 'Accordo scaduto senza conferma.', updated_at: now });
-    emit('job.expired', { job_id: jobId, data: { reason: 'deal_not_confirmed' } });
-    throw new HttpError(409, 'deal_expired', 'The negotiated deal expired before confirmation.');
-  }
-  if (!['now', 'schedule'].includes(mode)) throw new HttpError(400, 'invalid_mode', 'mode must be "now" or "schedule"');
-  const patch = { mode, updated_at: now };
-  if (mode === 'schedule') {
-    const at = scheduled_at ? Date.parse(scheduled_at) : NaN;
-    if (Number.isNaN(at) || at < now + 15 * 60000) throw new HttpError(400, 'invalid_schedule', 'scheduled_at must be ≥ 15 minutes from now');
-    if (at > now + 14 * 24 * 3600000) throw new HttpError(400, 'invalid_schedule', 'Scheduling is limited to 14 days ahead.');
-    const skill = getSkill(job.skill);
-    patch.scheduled_at = at;
-    patch.deadline_at = Math.max(job.deadline_at, at + (skill.typical_minutes + 60) * 60000);
-  }
-  const updated = { ...job, ...patch };
-  const pool = rankCandidates(updated).eligible.filter((c) => c.floor_cents <= job.deal.price_cents);
-  if (!pool.length) {
-    update('jobs', jobId, { ...patch, status: 'no_match', status_message: NO_SUPPLY_IT });
-    emit('job.no_match', { job_id: jobId, data: { message: NO_SUPPLY_IT, stage: 'confirm' } });
-    return loadJob(jobId);
-  }
+  const hold = job.price.total_cents + (job.price.hold_cents ?? 0);
   update('jobs', jobId, {
-    ...patch,
     status: 'dispatching',
-    status_message: 'Cerco la persona giusta…',
-    dispatch_pool: pool.map((c) => c.worker.id),
+    status_message: 'Invio le offerte ai partner…',
+    approval: { ...approval, at: iso(now) },
     dispatch_index: -1,
-    escrow: { status: 'held', provider: 'stub', amount_cents: job.deal.price_cents, currency: 'EUR', ref: `esc_${token(6)}`, held_at: iso(now) },
+    escrow: { status: 'held', provider: 'stub', amount_cents: hold, purchase_cap_cents: job.price.hold_cents ?? 0, currency: 'EUR', ref: `esc_${token(6)}`, held_at: iso(now) },
+    updated_at: now,
   });
-  emit('job.confirmed', { job_id: jobId, actor: 'buyer_human', data: { mode, scheduled_at: iso(patch.scheduled_at), price_cents: job.deal.price_cents, pool_size: pool.length } });
-  emit('escrow.held', { job_id: jobId, data: { amount_cents: job.deal.price_cents, provider: 'stub' } });
-  offerNext(jobId);
+  emit('job.confirmed', { job_id: jobId, actor: approval.by === 'policy' ? 'policy' : 'buyer_human', data: { approval, slot: slotLabel(job.slot_start, job.duration_min), price_cents: job.price.total_cents, headcount: job.headcount } });
+  emit('escrow.held', { job_id: jobId, data: { amount_cents: hold, provider: 'stub' } });
+  fillSeats(jobId);
   return loadJob(jobId);
 }
 
-// ---- cascade --------------------------------------------------------------
-function offerCard(job, worker, offer) {
-  const skill = getSkill(job.skill);
+// ---- offers --------------------------------------------------------------
+function offerCard(job, w, offer) {
+  const service = getService(job.service);
   return {
     offer_id: offer.id,
     job_id: job.id,
     rank: offer.rank,
     title: job.title,
-    skill: job.skill,
-    skill_name: skill.name_it,
+    service: job.service,
+    service_name: service.name_it,
+    segment: service.segment,
+    proof_kind: service.proof.kind,
     address: job.address,
     location: { lat: job.lat, lng: job.lng },
-    distance_km: Math.round(haversineKm(worker, job) * 10) / 10,
-    eta_min: offer.eta_min,
-    deadline_at: iso(job.deadline_at),
-    scheduled_at: iso(job.scheduled_at),
-    mode: job.mode,
-    pay_cents: job.deal.worker_payout_cents,
+    distance_km: Math.round(haversineKm(w, job) * 10) / 10,
+    slot_start: iso(job.slot_start),
+    slot_label: slotLabel(job.slot_start, job.duration_min),
+    duration_min: job.duration_min,
+    headcount: job.headcount,
+    seats: offer.seats,
+    pay_cents: offer.payout_cents,
     instructions: job.instructions,
     proof: job.proof_req,
+    params: job.params,
     expires_at: iso(offer.expires_at),
     ttl_s: Math.round((offer.expires_at - offer.created_at) / 1000),
     buyer: job.agent_name,
   };
 }
 
-export function offerNext(jobId) {
-  const job = loadJob(jobId);
-  if (job.status !== 'dispatching') return null;
-  if (get("SELECT id FROM offers WHERE job_id = ? AND status = 'pending'", jobId)) return null;
-  const skill = getSkill(job.skill);
+const openSeats = (job) => {
+  const pending = get("SELECT COALESCE(SUM(seats),0) AS s FROM offers WHERE job_id = ? AND status = 'pending'", job.id).s;
+  return job.headcount - job.seats_filled - pending;
+};
+
+// Keep one timed offer out per open seat, walking the ranked pool.
+export function fillSeats(jobId) {
+  let job = loadJob(jobId);
+  if (job.status !== 'dispatching') return [];
+  const sent = [];
   let pool = job.dispatch_pool ?? [];
   let idx = job.dispatch_index;
-
-  const tryFrom = () => {
-    for (let i = idx + 1; i < pool.length; i++) {
-      const w = get('SELECT * FROM workers WHERE id = ?', pool[i]);
-      const skip = !w ? 'gone'
-        : w.status !== 'active' ? w.status
-        : !w.online ? 'offline'
-        : activeJobCount(w.id) >= w.capacity ? 'busy'
-        : null;
-      if (skip) {
-        emit('dispatch.skipped', { job_id: jobId, worker_id: pool[i], data: { rank: i + 1, reason: skip } });
-        continue;
-      }
-      const s = scoreWorker(w, job, skill);
+  const tried = () => new Set(all('SELECT worker_id FROM offers WHERE job_id = ?', jobId).map((o) => o.worker_id));
+  const assigned = new Set(all("SELECT worker_id FROM assignments WHERE job_id = ? AND status != 'cancelled'", jobId).map((a) => a.worker_id));
+  let seats = openSeats(job);
+  const walk = () => {
+    while (seats > 0 && idx + 1 < pool.length) {
+      idx += 1;
+      const wid = pool[idx];
+      if (assigned.has(wid)) continue;
+      const w = get('SELECT * FROM workers WHERE id = ?', wid);
+      const cap = w && w.status === 'active' ? freeCapacity(w, job.slot_start, job.duration_min) : 0;
+      if (!cap) { emit('dispatch.skipped', { job_id: jobId, worker_id: wid, data: { rank: idx + 1, reason: !w ? 'gone' : w.status !== 'active' ? w.status : 'not_available' } }); continue; }
+      const already = all("SELECT COALESCE(SUM(crew),0) AS c FROM assignments WHERE job_id = ? AND worker_id = ? AND status NOT IN ('cancelled','no_show')", jobId, wid)[0].c;
+      const offerSeats = w.kind === 'business' ? Math.min(cap, seats, maxSeatsPerSupplier(job.headcount) - already) : 1;
+      if (offerSeats <= 0) continue;
+      const s = scoreWorker(w, job, job.slot_start);
       const now = clock.now();
-      const offer = { id: id('off'), job_id: jobId, worker_id: w.id, rank: i + 1, score: s.score, price_cents: job.deal.worker_payout_cents, eta_min: s.eta_min, status: 'pending', created_at: now, expires_at: now + offerTtlMs() };
+      const offer = {
+        id: id('off'), job_id: jobId, worker_id: wid, rank: idx + 1, score: s.score, seats: offerSeats,
+        payout_cents: job.price.seat_payout_cents * offerSeats, status: 'pending', created_at: now, expires_at: now + offerTtlMs(),
+      };
       insert('offers', offer);
-      update('workers', w.id, { offers_received: w.offers_received + 1 });
-      update('jobs', jobId, { dispatch_index: i, updated_at: now });
-      emit('dispatch.offer_sent', { job_id: jobId, worker_id: w.id, data: { ...offerCard(job, w, offer), alias: w.display_name, score: s.score } });
-      return offer;
+      update('workers', wid, { offers_received: w.offers_received + 1 });
+      seats -= offerSeats;
+      sent.push(offer);
+      emit('dispatch.offer_sent', { job_id: jobId, worker_id: wid, data: { ...offerCard(job, w, offer), alias: w.display_name, score: s.score } });
     }
-    return null;
   };
-
-  let offer = tryFrom();
-  if (!offer) {
-    // Pool exhausted: one rescan for workers who came online since confirm.
-    const tried = new Set(all('SELECT worker_id FROM offers WHERE job_id = ?', jobId).map((o) => o.worker_id));
-    const fresh = rankCandidates(job).eligible
-      .filter((c) => c.floor_cents <= job.deal.price_cents && !tried.has(c.worker.id) && !pool.includes(c.worker.id))
-      .map((c) => c.worker.id);
+  walk();
+  if (seats > 0) {
+    // Pool exhausted: one rescan for partners who became available since approval.
+    const t = tried();
+    const fresh = rankCandidates(job, { slotStart: job.slot_start }).eligible.map((c) => c.worker.id).filter((x) => !t.has(x) && !pool.includes(x) && !assigned.has(x));
     if (fresh.length) {
-      idx = pool.length - 1;
       pool = [...pool, ...fresh];
       update('jobs', jobId, { dispatch_pool: pool });
       emit('dispatch.pool_extended', { job_id: jobId, data: { added: fresh.length } });
-      offer = tryFrom();
+      walk();
     }
   }
-  if (!offer) {
-    const now = clock.now();
-    update('jobs', jobId, {
-      status: 'no_match', status_message: NO_SUPPLY_IT, updated_at: now,
-      escrow: { ...job.escrow, status: 'refunded', refunded_at: iso(now) },
-    });
-    emit('job.no_match', { job_id: jobId, data: { message: NO_SUPPLY_IT, stage: 'cascade', tried: pool.length } });
+  update('jobs', jobId, { dispatch_index: idx, updated_at: clock.now() });
+  job = loadJob(jobId);
+  const pendingLeft = get("SELECT COUNT(*) AS c FROM offers WHERE job_id = ? AND status = 'pending'", jobId).c;
+  if (!pendingLeft && job.seats_filled < job.headcount) closeDispatch(jobId, 'pool_exhausted');
+  return sent;
+}
+
+// No more candidates: honest partial coverage or no_match.
+function closeDispatch(jobId, reason) {
+  const job = loadJob(jobId);
+  const now = clock.now();
+  if (job.seats_filled === 0) {
+    update('jobs', jobId, { status: 'no_match', status_message: NO_SUPPLY_IT, updated_at: now, escrow: { ...job.escrow, status: 'refunded', refunded_at: iso(now) } });
+    emit('job.no_match', { job_id: jobId, data: { message: NO_SUPPLY_IT, stage: 'dispatch', reason } });
     emit('escrow.refunded', { job_id: jobId, data: { amount_cents: job.escrow?.amount_cents } });
+    return;
   }
-  return offer;
+  const missing = job.headcount - job.seats_filled;
+  const refund = job.price.seat_payout_cents * missing + Math.round((job.price.fee_cents / job.headcount) * missing);
+  const msg = `Coperti ${job.seats_filled} ${job.seats_filled === 1 ? 'posto' : 'posti'} su ${job.headcount}. ${NO_SUPPLY_IT.replace('.', '')} per i restanti ${missing}; rimborso di ${eur(refund)}.`;
+  update('jobs', jobId, { status: job.status === 'dispatching' ? 'assigned' : job.status, status_message: msg, updated_at: now, escrow: { ...job.escrow, partial_refund_cents: refund } });
+  emit('job.partially_filled', { job_id: jobId, data: { filled: job.seats_filled, headcount: job.headcount, refund_cents: refund, message: msg } });
 }
 
 export function respondOffer(workerId, offerId, accept, { via = 'app' } = {}) {
-  const result = tx(() => {
+  const r = tx(() => {
     const offer = get('SELECT * FROM offers WHERE id = ?', offerId);
     if (!offer || offer.worker_id !== workerId) throw new HttpError(404, 'offer_not_found', 'Offerta non trovata');
     const now = clock.now();
@@ -153,72 +157,91 @@ export function respondOffer(workerId, offerId, accept, { via = 'app' } = {}) {
     if (!accept) {
       update('offers', offerId, { status: 'declined', responded_at: now });
       update('workers', workerId, { offers_declined: w.offers_declined + 1 });
-      return { declined: true, job };
+      return { declined: true, offer };
     }
-    if (job.status !== 'dispatching' || job.assigned_worker_id) {
+    if (!['dispatching', 'assigned', 'in_progress'].includes(job.status) || job.seats_filled >= job.headcount) {
       update('offers', offerId, { status: 'cancelled', responded_at: now });
-      throw new HttpError(409, 'job_taken', 'Lavoro già assegnato');
+      return { taken: true };
     }
-    if (activeJobCount(workerId) >= w.capacity) throw new HttpError(409, 'at_capacity', 'Hai già il numero massimo di lavori attivi');
+    const crew = Math.min(offer.seats, job.headcount - job.seats_filled, freeCapacity(w, job.slot_start, job.duration_min) || offer.seats);
+    const account = get('SELECT * FROM accounts WHERE id = ?', job.account_id);
+    const payout = job.price.seat_payout_cents * crew;
+    const contract = routeContract({ account, worker: w, payoutCents: payout });
+    contract.text = contractText({ route: contract.route, account, worker: w, job, payoutCents: payout });
+    const a = { id: id('as'), job_id: job.id, worker_id: workerId, crew, status: 'assigned', contract, payout_cents: payout, assigned_via: via, assigned_at: now };
+    insert('assignments', a);
     update('offers', offerId, { status: 'accepted', responded_at: now });
-    run_cancelOthers(offer.job_id, offerId, now);
-    update('jobs', offer.job_id, { status: 'assigned', assigned_worker_id: workerId, assigned_via: via, assigned_at: now, status_message: null, updated_at: now });
+    const filled = job.seats_filled + crew;
+    update('jobs', job.id, { seats_filled: filled, status: filled >= job.headcount && job.status === 'dispatching' ? 'assigned' : job.status, status_message: filled >= job.headcount ? null : `Coperti ${filled} ${filled === 1 ? 'posto' : 'posti'} su ${job.headcount}: cerco gli altri…`, updated_at: now });
+    if (filled >= job.headcount) {
+      for (const o of all("SELECT id FROM offers WHERE job_id = ? AND status = 'pending'", job.id)) update('offers', o.id, { status: 'cancelled', responded_at: now });
+    }
     update('workers', workerId, { offers_accepted: w.offers_accepted + 1, jobs_accepted: w.jobs_accepted + 1 });
-    return { accepted: true, job };
+    return { accepted: true, assignment: a, job };
   });
   const offer = get('SELECT * FROM offers WHERE id = ?', offerId);
-  if (result.declined) {
+  if (r.taken) throw new HttpError(409, 'job_taken', 'Posti già coperti');
+  if (r.declined) {
     emit('dispatch.offer_declined', { job_id: offer.job_id, worker_id: workerId, actor: via, data: { rank: offer.rank } });
-    offerNext(offer.job_id);
+    fillSeats(offer.job_id);
     return { ok: true, status: 'declined' };
   }
   const job = loadJob(offer.job_id);
   const w = get('SELECT * FROM workers WHERE id = ?', workerId);
-  emit('dispatch.offer_accepted', { job_id: job.id, worker_id: workerId, actor: via, data: { rank: offer.rank } });
-  emit('job.assigned', { job_id: job.id, worker_id: workerId, data: { worker: publicWorker(w, job), mode: job.mode, scheduled_at: iso(job.scheduled_at) } });
-  return { ok: true, status: 'accepted', job_id: job.id };
+  emit('dispatch.offer_accepted', { job_id: job.id, worker_id: workerId, actor: via, data: { rank: offer.rank, crew: r.assignment.crew } });
+  emit('job.assigned', { job_id: job.id, worker_id: workerId, data: { worker: publicWorker(w, job), crew: r.assignment.crew, seats_filled: job.seats_filled, headcount: job.headcount, contract: r.assignment.contract.label_it } });
+  if (job.seats_filled >= job.headcount) emit('job.fully_staffed', { job_id: job.id, data: { headcount: job.headcount } });
+  else fillSeats(job.id); // top up offers, or close honestly if nobody is left
+  return { ok: true, status: 'accepted', job_id: job.id, assignment_id: r.assignment.id, contract: r.assignment.contract.label_it };
 }
 
-function run_cancelOthers(jobId, keepId, now) {
-  for (const o of all("SELECT id FROM offers WHERE job_id = ? AND status = 'pending' AND id != ?", jobId, keepId)) {
-    update('offers', o.id, { status: 'cancelled', responded_at: now });
+// ---- partner actions (per assignment) --------------------------------------
+function myAssignment(workerId, jobId, allowed) {
+  const a = get("SELECT * FROM assignments WHERE job_id = ? AND worker_id = ? AND status NOT IN ('cancelled','no_show') ORDER BY assigned_at DESC", jobId, workerId);
+  if (!a) throw new HttpError(403, 'not_your_job', 'Questo lavoro non è assegnato a te');
+  if (!allowed.includes(a.status)) throw new HttpError(409, 'invalid_state', `Stato attuale: ${a.status}`);
+  return a;
+}
+
+function syncJobStatus(jobId) {
+  const job = loadJob(jobId);
+  const as = all("SELECT * FROM assignments WHERE job_id = ? AND status NOT IN ('cancelled','no_show')", jobId);
+  if (['done', 'cancelled', 'expired', 'no_match'].includes(job.status)) return;
+  const allDone = as.length && as.every((a) => a.status === 'done');
+  const noMoreSeats = job.seats_filled >= job.headcount || !get("SELECT 1 AS x FROM offers WHERE job_id = ? AND status = 'pending'", jobId);
+  if (allDone && noMoreSeats && job.status !== 'dispatching') return finalizeJob(jobId);
+  if (as.some((a) => ['en_route', 'on_site', 'done'].includes(a.status)) && job.status === 'assigned') {
+    update('jobs', jobId, { status: 'in_progress', updated_at: clock.now() });
+    emit('job.in_progress', { job_id: jobId });
   }
 }
 
-// ---- worker job actions --------------------------------------------------
-function workerJob(workerId, jobId, allowed) {
-  const job = loadJob(jobId);
-  if (job.assigned_worker_id !== workerId) throw new HttpError(403, 'not_your_job', 'Questo lavoro non è assegnato a te');
-  if (!allowed.includes(job.status)) throw new HttpError(409, 'invalid_state', `Stato attuale: ${job.status}`);
-  return job;
-}
-
 export function startJob(workerId, jobId) {
-  workerJob(workerId, jobId, ['assigned']);
-  update('jobs', jobId, { status: 'en_route', started_at: clock.now(), updated_at: clock.now() });
+  const a = myAssignment(workerId, jobId, ['assigned']);
+  update('assignments', a.id, { status: 'en_route', started_at: clock.now() });
   emit('job.en_route', { job_id: jobId, worker_id: workerId, actor: 'worker' });
+  syncJobStatus(jobId);
   return { ok: true };
 }
 
 export function arriveJob(workerId, jobId) {
-  const job = workerJob(workerId, jobId, ['en_route']);
+  const a = myAssignment(workerId, jobId, ['en_route']);
+  const job = loadJob(jobId);
   const w = get('SELECT * FROM workers WHERE id = ?', workerId);
   const d = haversineKm(w, job) * 1000;
-  if (d > job.proof_req.gps_radius_m) {
-    throw new HttpError(409, 'not_on_site', `Sei a ${Math.round(d)} m dal luogo: avvicinati entro ${job.proof_req.gps_radius_m} m.`);
-  }
-  update('jobs', jobId, { status: 'on_site', arrived_at: clock.now(), updated_at: clock.now() });
-  emit('job.on_site', { job_id: jobId, worker_id: workerId, actor: 'worker', data: { distance_m: Math.round(d) } });
+  if (d > job.proof_req.gps_radius_m) throw new HttpError(409, 'not_on_site', `Sei a ${Math.round(d)} m dal luogo: avvicinati entro ${job.proof_req.gps_radius_m} m.`);
+  update('assignments', a.id, { status: 'on_site', arrived_at: clock.now() });
+  emit('job.on_site', { job_id: jobId, worker_id: workerId, actor: 'worker', data: { distance_m: Math.round(d), check_in: job.proof_req.kind === 'timesheet' } });
   return { ok: true };
 }
 
 const IMG_RE = /^data:(image\/(jpeg|png|webp|svg\+xml));base64,([A-Za-z0-9+/=]+)$/;
 const EXT = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/svg+xml': 'svg' };
-const MAX_PHOTO_BYTES = 6 * 1024 * 1024;
 
-// Proof is checked automatically against the task card before a job is Done.
+// Photo services: photos + checklist. Timesheet services: check-out (hours worked).
 export function submitProof(workerId, jobId, { photos = [], answers = {}, simulated = false } = {}) {
-  const job = workerJob(workerId, jobId, ['on_site']);
+  const a = myAssignment(workerId, jobId, ['on_site']);
+  const job = loadJob(jobId);
   const w = get('SELECT * FROM workers WHERE id = ?', workerId);
   const req = job.proof_req;
   const now = clock.now();
@@ -228,76 +251,124 @@ export function submitProof(workerId, jobId, { photos = [], answers = {}, simula
     const m = IMG_RE.exec(String(p));
     if (!m) { problems.push('Formato foto non valido'); continue; }
     const buf = Buffer.from(m[3], 'base64');
-    if (buf.length > MAX_PHOTO_BYTES) { problems.push('Foto troppo grande (max 6 MB)'); continue; }
+    if (buf.length > 6 * 1024 * 1024) { problems.push('Foto troppo grande (max 6 MB)'); continue; }
     decoded.push({ mime: m[1], buf });
   }
-  if (decoded.length < req.photos_min) problems.push(`Servono almeno ${req.photos_min} foto (ne hai caricate ${decoded.length})`);
+  if (decoded.length < (req.photos_min ?? 0)) problems.push(`Servono almeno ${req.photos_min} foto (ne hai caricate ${decoded.length})`);
   const distance_m = Math.round(haversineKm(w, job) * 1000);
   const gps_ok = distance_m <= req.gps_radius_m;
   if (!gps_ok) problems.push(`Posizione a ${distance_m} m dal luogo (max ${req.gps_radius_m} m)`);
-  const deadline_ok = now <= job.deadline_at;
-  if (!deadline_ok) problems.push('Scadenza superata');
-  const cleanAnswers = {};
-  for (const item of req.checklist) {
+  const clean = {};
+  for (const item of req.checklist ?? []) {
     const v = answers?.[item.id];
-    const empty = v == null || v === '';
-    if (empty) { if (item.required) problems.push(`Risposta mancante: ${item.q}`); continue; }
+    if (v == null || v === '') { if (item.required) problems.push(`Risposta mancante: ${item.q}`); continue; }
     if (item.type === 'yes_no') {
-      if (!['yes', 'no', true, false].includes(v)) problems.push(`Rispondi sì/no: ${item.q}`);
-      else cleanAnswers[item.id] = v === true || v === 'yes' ? 'yes' : 'no';
+      if (!['yes', 'no', true, false].includes(v)) problems.push(`Rispondi sì/no: ${item.q}`); else clean[item.id] = v === true || v === 'yes' ? 'yes' : 'no';
     } else if (item.type === 'number') {
       const n = Number(String(v).replace(',', '.'));
-      if (Number.isNaN(n)) problems.push(`Numero non valido: ${item.q}`);
-      else cleanAnswers[item.id] = n;
-    } else cleanAnswers[item.id] = String(v).slice(0, 2000);
+      if (Number.isNaN(n)) problems.push(`Numero non valido: ${item.q}`); else clean[item.id] = n;
+    } else clean[item.id] = String(v).slice(0, 2000);
+  }
+  if (job.params?.spesa_max_eur != null && clean.spesa_eur != null && clean.spesa_eur > job.params.spesa_max_eur) {
+    problems.push(`Scontrino (${clean.spesa_eur} €) oltre il tetto di spesa (${job.params.spesa_max_eur} €)`);
   }
   if (problems.length) {
     emit('job.proof_rejected', { job_id: jobId, worker_id: workerId, data: { problems } });
     throw new HttpError(422, 'proof_rejected', 'La prova non soddisfa i requisiti', { problems });
   }
-  // The in-browser demo has no file server: keep photos inline as data URLs.
   const inline = globalThis.ARONICA_INLINE_UPLOADS;
   const dir = join(UPLOAD_DIR(), jobId);
-  if (!inline) mkdirSync(dir, { recursive: true });
+  if (!inline && decoded.length) mkdirSync(dir, { recursive: true });
   const urls = decoded.map((p, i) => {
     if (inline) return `data:${p.mime};base64,${p.buf.toString('base64')}`;
     const name = `${token(9)}-${i + 1}.${EXT[p.mime]}`;
     writeFileSync(join(dir, name), p.buf);
     return `/uploads/${jobId}/${name}`;
   });
+  const timesheet = req.kind === 'timesheet' ? {
+    check_in: iso(a.arrived_at),
+    check_out: iso(now),
+    minutes_worked: Math.round((now - a.arrived_at) / 60000),
+    minutes_planned: job.duration_min,
+  } : null;
   const proof = {
-    photos: urls,
-    answers: cleanAnswers,
+    kind: req.kind, photos: urls, answers: clean, timesheet,
     gps: { lat: w.lat, lng: w.lng, distance_m, radius_m: req.gps_radius_m, simulated_position: !realGps.has(workerId) },
-    submitted_at: iso(now),
-    checks: { photos: true, gps: gps_ok, deadline: deadline_ok, checklist: true },
-    verified: true,
-    simulated,
+    submitted_at: iso(now), verified: true, simulated,
   };
-  const payout = job.deal.worker_payout_cents;
-  const skillJobs = { ...w.skill_jobs, [job.skill]: (w.skill_jobs?.[job.skill] ?? 0) + 1 };
-  update('jobs', jobId, {
-    status: 'done', proof, completed_at: now, updated_at: now, status_message: null,
-    escrow: { ...job.escrow, status: 'released', released_at: iso(now), worker_payout_cents: payout, platform_fee_cents: job.deal.platform_fee_cents },
-  });
-  update('workers', workerId, { jobs_completed: w.jobs_completed + 1, earnings_cents: w.earnings_cents + payout, skill_jobs: skillJobs });
-  emit('job.proof_submitted', { job_id: jobId, worker_id: workerId, actor: simulated ? 'simulator' : 'worker', data: { photos: urls.length, simulated } });
-  emit('job.done', { job_id: jobId, worker_id: workerId, data: { proof, payout_cents: payout } });
-  emit('escrow.released', { job_id: jobId, data: { amount_cents: job.deal.price_cents, payout_cents: payout } });
+  update('assignments', a.id, { status: 'done', completed_at: now, proof });
+  const skillJobs = { ...w.skill_jobs, [job.service]: (w.skill_jobs?.[job.service] ?? 0) + 1 };
+  update('workers', workerId, { jobs_completed: w.jobs_completed + 1, earnings_cents: w.earnings_cents + a.payout_cents, skill_jobs: skillJobs });
+  emit('job.proof_submitted', { job_id: jobId, worker_id: workerId, actor: simulated ? 'simulator' : 'worker', data: { kind: req.kind, photos: urls.length, simulated, timesheet } });
+  emit('assignment.done', { job_id: jobId, worker_id: workerId, data: { payout_cents: a.payout_cents, proof } });
   enforce(workerId);
-  return { ok: true, payout_cents: payout, proof };
+  syncJobStatus(jobId);
+  return { ok: true, payout_cents: a.payout_cents, proof };
 }
 
-// Worker bails after accepting: counts against them; the job goes back into the
-// cascade (Uber re-matches the rider rather than cancelling their trip).
+function finalizeJob(jobId) {
+  const job = loadJob(jobId);
+  const now = clock.now();
+  const done = all("SELECT * FROM assignments WHERE job_id = ? AND status = 'done'", jobId);
+  const paid = done.reduce((a, x) => a + x.payout_cents, 0);
+  const fee = Math.round(job.price.fee_cents * (done.reduce((a, x) => a + x.crew, 0) / job.headcount));
+  const spent = done.reduce((a, x) => a + Math.round((x.proof?.answers?.spesa_eur ?? 0) * 100), 0);
+  const escrow = { ...job.escrow, status: 'released', released_at: iso(now), paid_to_partners_cents: paid, platform_fee_cents: fee, purchase_reimbursed_cents: spent };
+  const account = get('SELECT * FROM accounts WHERE id = ?', job.account_id);
+  let invoice = null;
+  if (account.kind === 'business') {
+    const n = get("SELECT COUNT(*) AS c FROM jobs WHERE invoice IS NOT NULL").c + 1;
+    const imponibile = paid + fee;
+    invoice = {
+      number: `AR-${romeParts(now).y}-${String(n).padStart(4, '0')}`,
+      date: iso(now),
+      to: { name: account.org?.legal_name ?? account.name, vat_id: account.org?.vat_id ?? null, sdi: account.org?.sdi ?? null },
+      lines: [...job.price.lines, ...job.price.surcharges.map((s) => ({ label: s.label, cents: s.cents }))],
+      imponibile_cents: imponibile,
+      iva_cents: Math.round(imponibile * 0.22),
+      totale_cents: imponibile + Math.round(imponibile * 0.22),
+      status: 'bozza (stub, non inviata allo SDI)',
+    };
+  }
+  update('jobs', jobId, { status: 'done', completed_at: now, updated_at: now, escrow, invoice, status_message: job.seats_filled < job.headcount ? job.status_message : null });
+  emit('job.done', { job_id: jobId, data: { paid_cents: paid, invoice: invoice?.number ?? null } });
+  emit('escrow.released', { job_id: jobId, data: { paid_cents: paid, fee_cents: fee } });
+}
+
+// Partner bails after accepting: counts against them; the seat is re-dispatched.
 export function workerCancel(workerId, jobId, reason = null) {
-  const job = workerJob(workerId, jobId, ['assigned', 'en_route']);
+  const a = myAssignment(workerId, jobId, ['assigned', 'en_route']);
   const w = get('SELECT * FROM workers WHERE id = ?', workerId);
   update('workers', workerId, { jobs_cancelled: w.jobs_cancelled + 1 });
-  update('jobs', jobId, { status: 'dispatching', assigned_worker_id: null, assigned_via: null, assigned_at: null, started_at: null, status_message: 'La persona ha annullato: cerco un sostituto…', updated_at: clock.now() });
-  emit('job.worker_cancelled', { job_id: jobId, worker_id: workerId, actor: 'worker', data: { reason } });
+  reopenSeat(a, 'cancelled', 'job.worker_cancelled', reason);
   enforce(workerId);
-  offerNext(jobId);
+  return { ok: true };
+}
+
+function reopenSeat(a, newStatus, eventType, reason) {
+  const job = loadJob(a.job_id);
+  update('assignments', a.id, { status: newStatus, completed_at: clock.now() });
+  const filled = Math.max(0, job.seats_filled - a.crew);
+  const canRefill = clock.now() < job.slot_start + (job.duration_min * 60000) / 2;
+  update('jobs', job.id, {
+    seats_filled: filled,
+    status: canRefill && !['done', 'cancelled'].includes(job.status) ? 'dispatching' : job.status,
+    status_message: canRefill ? 'Una persona non è disponibile: cerco un sostituto…' : job.status_message,
+    updated_at: clock.now(),
+  });
+  emit(eventType, { job_id: job.id, worker_id: a.worker_id, data: { reason, crew: a.crew, replacement: canRefill } });
+  if (canRefill) { emit('dispatch.replacement', { job_id: job.id, data: { seats: a.crew } }); fillSeats(job.id); }
+  syncJobStatus(job.id);
+}
+
+// Ops/demo hook and the tick use the same path.
+export function markNoShow(assignmentId, reason = 'no_show') {
+  const a = get('SELECT * FROM assignments WHERE id = ?', assignmentId);
+  if (!a || !['assigned', 'en_route'].includes(a.status)) throw new HttpError(409, 'invalid_state', 'Assignment not active');
+  const w = get('SELECT * FROM workers WHERE id = ?', a.worker_id);
+  update('workers', w.id, { no_shows: w.no_shows + 1 });
+  reopenSeat(a, 'no_show', 'assignment.no_show', reason);
+  enforce(w.id);
   return { ok: true };
 }
 
@@ -305,62 +376,70 @@ export function buyerCancel(jobId, reason = null) {
   const job = loadJob(jobId);
   if (['done', 'cancelled', 'expired', 'no_match'].includes(job.status)) throw new HttpError(409, 'invalid_state', `Job is ${job.status}`);
   const now = clock.now();
-  // Cancellation fee stub: free until someone is on the way.
-  const fee = ['en_route', 'on_site'].includes(job.status) ? Math.round((job.deal?.price_cents ?? 0) * 0.3) : 0;
-  const escrow = job.escrow ? { ...job.escrow, status: fee ? 'partially_released' : 'refunded', cancel_fee_cents: fee, refunded_at: iso(now) } : null;
+  const started = all("SELECT * FROM assignments WHERE job_id = ? AND status IN ('en_route','on_site')", jobId);
+  const lateCancel = job.slot_start && job.slot_start - now < 24 * 3600000 && job.seats_filled > 0;
+  const fee = started.length ? Math.round(job.price.total_cents * 0.5) : lateCancel ? Math.round(job.price.total_cents * 0.2) : 0;
   for (const o of all("SELECT id FROM offers WHERE job_id = ? AND status = 'pending'", jobId)) update('offers', o.id, { status: 'cancelled', responded_at: now });
-  update('jobs', jobId, { status: 'cancelled', cancelled_at: now, updated_at: now, escrow, status_message: reason ? `Annullato: ${reason}` : 'Annullato dal cliente' });
-  emit('job.cancelled', { job_id: jobId, worker_id: job.assigned_worker_id, actor: 'buyer', data: { reason, cancel_fee_cents: fee } });
-  if (fee && job.assigned_worker_id) {
-    const w = get('SELECT * FROM workers WHERE id = ?', job.assigned_worker_id);
-    update('workers', w.id, { earnings_cents: w.earnings_cents + Math.round(fee * 0.85) });
-  }
+  for (const a of all("SELECT id FROM assignments WHERE job_id = ? AND status IN ('assigned','en_route','on_site')", jobId)) update('assignments', a.id, { status: 'cancelled', completed_at: now });
+  const escrow = job.escrow ? { ...job.escrow, status: fee ? 'partially_released' : 'refunded', cancel_fee_cents: fee, refunded_at: iso(now) } : null;
+  update('jobs', jobId, { status: 'cancelled', cancelled_at: now, updated_at: now, escrow, status_message: fee ? `Annullato con penale ${eur(fee)} (preavviso sotto le 24 ore)` : 'Annullato senza costi' });
+  emit('job.cancelled', { job_id: jobId, actor: 'buyer', data: { reason, cancel_fee_cents: fee } });
   return { ok: true, cancel_fee_cents: fee };
 }
 
-// ---- the loop (PRD: every ~2s) --------------------------------------------
+// ---- the loop (every ~2s) -------------------------------------------------
 export function tick() {
   const now = clock.now();
-  // 1) expire unanswered offers → next worker
+  // 1) expire unanswered offers → next partner for that seat
   for (const o of all("SELECT * FROM offers WHERE status = 'pending' AND expires_at <= ?", now)) {
     update('offers', o.id, { status: 'expired', responded_at: now });
     const w = get('SELECT offers_expired FROM workers WHERE id = ?', o.worker_id);
     if (w) update('workers', o.worker_id, { offers_expired: w.offers_expired + 1 });
     emit('dispatch.offer_expired', { job_id: o.job_id, worker_id: o.worker_id, data: { rank: o.rank } });
-    offerNext(o.job_id);
+    fillSeats(o.job_id);
   }
-  // 2) dispatching jobs with no live offer (e.g. after restart)
-  for (const j of all("SELECT id FROM jobs WHERE status = 'dispatching' AND NOT EXISTS (SELECT 1 FROM offers o WHERE o.job_id = jobs.id AND o.status = 'pending')")) {
-    offerNext(j.id);
+  // 2) dispatching jobs with open seats and nothing pending (e.g. after restart)
+  for (const j of all("SELECT id FROM jobs WHERE status = 'dispatching' AND seats_filled < headcount AND NOT EXISTS (SELECT 1 FROM offers o WHERE o.job_id = jobs.id AND o.status = 'pending')")) fillSeats(j.id);
+  // 3) no-shows: still not on the way well after the start → replace
+  for (const a of all("SELECT a.* FROM assignments a JOIN jobs j ON j.id = a.job_id WHERE a.status = 'assigned' AND MAX(j.slot_start, a.assigned_at) + ? < ?", NO_SHOW_GRACE_MS, now)) {
+    markNoShow(a.id, 'not_started_in_time');
   }
-  // 3) unconfirmed deals lapse
-  for (const j of all("SELECT * FROM jobs WHERE status = 'pending_confirmation'")) {
-    if (j.deal?.valid_until < now) {
-      update('jobs', j.id, { status: 'expired', status_message: 'Accordo scaduto senza conferma.', updated_at: now });
-      emit('job.expired', { job_id: j.id, data: { reason: 'deal_not_confirmed' } });
-    }
-  }
-  // 4) deadlines
-  for (const j of all("SELECT * FROM jobs WHERE deadline_at < ? AND status IN ('negotiating','dispatching','assigned','en_route','on_site')", now)) {
-    const escrow = j.escrow ? { ...j.escrow, status: 'refunded', refunded_at: iso(now) } : null;
+  // 4) stop dispatching once half the job's time has gone
+  for (const j of all("SELECT id FROM jobs WHERE status = 'dispatching' AND slot_start + duration_min * 30000 < ?", now)) {
     for (const o of all("SELECT id FROM offers WHERE job_id = ? AND status = 'pending'", j.id)) update('offers', o.id, { status: 'cancelled', responded_at: now });
-    update('jobs', j.id, { status: 'expired', escrow, updated_at: now, status_message: 'Scadenza superata senza prova.' });
-    emit('job.expired', { job_id: j.id, worker_id: j.assigned_worker_id, data: { reason: 'deadline', was: j.status } });
-    if (ACTIVE.includes(j.status) && j.assigned_worker_id) {
-      const w = get('SELECT no_shows FROM workers WHERE id = ?', j.assigned_worker_id);
-      update('workers', j.assigned_worker_id, { no_shows: w.no_shows + 1 });
-      emit('worker.no_show', { job_id: j.id, worker_id: j.assigned_worker_id });
-      enforce(j.assigned_worker_id);
+    closeDispatch(j.id, 'slot_started');
+  }
+  // 5) end of shift: timesheet partners still on site are checked out automatically;
+  //    a job past its end + 3h with nothing more to happen is closed.
+  for (const j of all("SELECT * FROM jobs WHERE status IN ('assigned','in_progress') AND slot_start + duration_min * 60000 < ?", now)) {
+    if (j.proof_req.kind === 'timesheet') {
+      for (const a of all("SELECT * FROM assignments WHERE job_id = ? AND status = 'on_site'", j.id)) {
+        try { submitProof(a.worker_id, j.id, { answers: { notes: 'Check-out automatico a fine turno' }, simulated: a.assigned_via === 'sim' }); } catch { /* */ }
+      }
     }
+    if (j.slot_start + j.duration_min * 60000 + 3 * 3600000 < now) {
+      const live = all("SELECT * FROM assignments WHERE job_id = ? AND status IN ('en_route','on_site')", j.id);
+      for (const a of live) update('assignments', a.id, { status: 'no_show', completed_at: now });
+      const anyDone = get("SELECT 1 AS x FROM assignments WHERE job_id = ? AND status = 'done'", j.id);
+      if (anyDone) finalizeJob(j.id);
+      else {
+        update('jobs', j.id, { status: 'expired', updated_at: now, status_message: 'Lavoro non completato: rimborso totale.', escrow: { ...j.escrow, status: 'refunded', refunded_at: iso(now) } });
+        emit('job.expired', { job_id: j.id, data: { reason: 'not_completed' } });
+      }
+    }
+  }
+  // 6) scheduling / approval that went stale
+  for (const j of all("SELECT * FROM jobs WHERE status IN ('scheduling','pending_confirmation') AND window_end < ?", now)) {
+    update('jobs', j.id, { status: 'expired', updated_at: now, status_message: 'La finestra richiesta è passata senza conferma.' });
+    emit('job.expired', { job_id: j.id, data: { reason: 'window_passed' } });
   }
 }
 
 export function pendingOffersForWorker(workerId) {
   return all("SELECT * FROM offers WHERE worker_id = ? AND status = 'pending' AND expires_at > ?", workerId, clock.now()).map((o) => {
     const job = loadJob(o.job_id);
-    const w = get('SELECT * FROM workers WHERE id = ?', workerId);
-    return offerCard(job, w, o);
+    return offerCard(job, get('SELECT * FROM workers WHERE id = ?', workerId), o);
   });
 }
 
-export { offerCard, eur };
+export { serializeAssignment };

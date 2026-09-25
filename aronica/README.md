@@ -1,80 +1,117 @@
-# Aronica — Agent→Human dispatch (Milano v1)
+# Aronica: Agent→Human dispatch (Milano, v2)
 
-AI assistants hire verified people and businesses for physical field-proof tasks. They negotiate live with supplier agents, a human confirms with one tap (Now / Schedule), and the work is dispatched right away through a timed Uber-style cascade.
+Aronica is the physical step of an agentic flow, and it serves two kinds of buyer:
+
+- **Personal assistants.** An assistant that plans your week turns "sistemare il giardino" into a booked gardener, and "stasera ho un evento, qualcuno mi compri un jeans" into an errand with a purchase cap.
+- **Company agents.** A procurement or ops agent books one-shot staff, for example "4 facchini venerdì 7-12 in Fiera Rho", and the booking is auto-approved under company policy.
+
+Every booking gets verified partners at a fixed price, with A2A negotiation on *when*. The right contract is generated for each person, and a no-show is replaced automatically.
 
 ```bash
 cd aronica
 npm start            # http://localhost:8787 — seeds Milano demo data on first run
-npm test             # 17 tests: matching, cascade, negotiation, reliability, proof, MCP, REST
-npm run demo:agent -- --confirm   # scripted buyer agent runs the whole lifecycle over REST
+npm test             # 21 tests: compiler, pricing, matching, seats, contracts, no-show, MCP, REST
+npm run demo:agent -- --confirm   # scripted assistant + company agent over REST
 npm run seed         # wipe + reseed
+npm run build:demo   # single-file offline demo → dist/aronica-demo.html
 ```
 
-Requires Node ≥ 22.5. There are **zero npm dependencies**: it uses `node:sqlite`, `node:http` and vanilla JS. The map uses Leaflet + CARTO tiles from a CDN and falls back to a built-in offline stylised map of Milano when the CDN is unreachable.
+Requirements:
+
+- Node ≥ 22.5.
+- **Zero runtime dependencies**: it runs on `node:sqlite`, `node:http` and vanilla JS.
+- devDependencies are only used to build the single-file demo.
+- Map: Leaflet from a CDN when it is reachable, otherwise a built-in offline map of Milano.
 
 | Surface | URL | Who |
 |---|---|---|
-| Buyer console | `/buyer` | Human operator: create a request or open an agent's `confirm_url`, watch the A2A negotiation, **Conferma**, track to *Fatto*, rate |
-| Worker / Business app | `/worker` | Partner (person or business): go online, get a full-screen timed offer, **Accetto / Rifiuto**, navigate, upload proof |
+| Buyer console | `/buyer` | Private person or company (switch *Privato / Azienda*). Describe the need, edit the compiled task, see the WHEN negotiation, confirm, follow seats → proof → rating / invoice |
+| Worker / Business app | `/worker` | Partner (person or business with a crew): timed full-screen offer, **Accetto / Rifiuto**, slot, contract, check-in/out or photo proof |
 | Agent Connector | `/mcp`, `/v1`, `/openapi.json`, `/v1/tools.json`, `/docs` | Claude, Grok, OpenAI, any tool-using agent |
-| Ops | `/ops` | Platform: live map, reliability tiers, verification queue, cascade, event log, simulator, API keys |
+| Ops | `/ops` | Live map, jobs and seats, assignments and contracts, reliability, verification, **demo clock** (jump to next job), **simulate no-show**, API keys |
 
-Demo API key: `ak_demo_milano`.
+Demo API keys:
+
+- `ak_demo_milano`: personal assistant; a human confirms.
+- `ak_demo_business`: Aurora Eventi & Hospitality Srl; auto-approval up to €600.
+
+## The v2 model
+
+1. **Task compiler** (`compile_task`, `src/compiler.js`). It turns a vague intent into a structured job:
+   - service and typed params (m², hedge, number of items, headcount, shift, article, spending cap…)
+   - the time window, parsed from Italian and English: "sabato mattina", "venerdì 7-12", "entro le 19", "dalle 9 alle 13"
+   - the duration, the proof type and the instructions
+   - the **open questions** the agent should confirm with its user
+
+   It fails closed on anything out of scope.
+2. **Fixed platform price** (`src/pricing.js`). Pricing is transparent and nobody haggles:
+   - per-service formula
+   - explicit surcharges: less than 3h notice +30%, less than 24h +15%, Sunday or after 20:00 +10%
+   - a 15% fee
+   - a pre-authorised purchase hold for errands
+3. **A2A negotiation on WHEN** (`src/negotiation.js`). Each supplier agent checks its partner's weekly calendar and current bookings, then answers `accept` (start time, seats it can cover), `counter` (another slot) or `decline` (for example, pay below the partner's minimum). Price is never negotiated.
+4. **Approval.** Consumers get a `confirm_url` for a one-tap human confirm. Business accounts are auto-approved by policy up to `auto_approve_max_cents`; above that, a human confirms.
+5. **Seats in parallel** (`src/dispatch.js`):
+   - one timed offer per open seat, highest score first
+   - business partners can cover several seats with their crew
+   - concentration cap: with 4+ people, at most half the seats go to one supplier, so a single no-show cannot sink the shift
+   - when supply runs out, coverage is honest: `no_match`, or partial coverage with a proportional refund
+6. **Contract routing** (`src/compliance.js`). Each assignment gets:
+   - `fattura_b2b` for a business with a VAT number
+   - `presto` (Libretto Famiglia / Contratto di prestazione occasionale) or `occasionale_privato` for individuals, checked against indicative caps: €5,000 per worker, €10,000 per buyer, €2,500 per worker–buyer pair, and ≤10 employees for companies
+   - otherwise `somministrazione` through a partner agency
+
+   **These are indicative stubs, not legal advice.**
+7. **Guarantee.** No-show detection runs at start + 20 min, followed by automatic replacement offers (a late arrival is allowed within half the job). Workers who cancel reopen their seat.
+8. **Proof.** Home services use photos with a GPS geofence. Shifts use a check-in/check-out timesheet, with auto-checkout at the end of the shift. Business jobs get an invoice draft (IVA 22%). Escrow is a stub: no real money moves.
+
+Lifecycle:
+
+- `scheduling → pending_confirmation → dispatching → assigned → in_progress → done`
+- other end states: `no_match`, `expired`, `cancelled`; partial coverage stays `assigned` with `seats_filled < headcount` and a proportional refund
+
+Assignments go through `assigned → en_route → on_site → done`, with the extra states `no_show` and `cancelled`.
 
 ## Agent Connector
 
-A single tool definition list (`src/connector.js`) is exposed four ways:
+A single tool list (`src/connector.js`) is exposed four ways:
 
-- **MCP (Streamable HTTP)** at `POST /mcp` with `Authorization: Bearer <key>`. Supports protocol versions 2025-06-18, 2025-03-26 and 2024-11-05.
+- **MCP (Streamable HTTP)** at `POST /mcp` with `Authorization: Bearer <key>`. Supported protocol versions: 2025-06-18, 2025-03-26 and 2024-11-05.
   - Claude Code: `claude mcp add --transport http aronica http://localhost:8787/mcp --header "Authorization: Bearer ak_demo_milano"`
-  - Claude Desktop / Cursor: stdio bridge `bin/aronica-mcp-stdio.js` (env `ARONICA_URL`, `ARONICA_API_KEY`)
-  - Claude API MCP connector, OpenAI Responses remote MCP, xAI remote MCP: point them at a public `https://…/mcp` and set `ARONICA_PUBLIC_URL`
+  - Claude Desktop / Cursor: the stdio bridge `bin/aronica-mcp-stdio.js`
+  - Claude API MCP connector, OpenAI Responses remote MCP, xAI remote MCP: a public `https://…/mcp` plus `ARONICA_PUBLIC_URL`
 - **REST** under `/v1` (see `/docs`), with long-poll or SSE events at `/v1/jobs/:id/events`
-- **OpenAPI 3.1** at `/openapi.json` (Custom GPT Actions, codegen)
+- **OpenAPI 3.1** at `/openapi.json`
 - **OpenAI/xAI function schemas** at `/v1/tools.json`
 
-Tools: `list_skills`, `search_workers`, `create_job`, `negotiate`, `auto_negotiate`, `accept_quote`, `get_job`, `list_jobs`, `wait_for_update`, `cancel_job`, `rate_worker`.
+Tools: `list_services`, `compile_task`, `search_supply`, `create_job`, `negotiate`, `auto_negotiate`, `accept_quote`, `get_job`, `list_jobs`, `wait_for_update`, `cancel_job`, `rate_worker`.
 
-Lifecycle: `negotiating → pending_confirmation → dispatching → assigned → en_route → on_site → done`. The other end states are `no_match`, `expired` and `cancelled`.
-
-**Agents negotiate; humans confirm.** `accept_quote` returns a `confirm_url` holding a per-job secret token. The human opens it and taps *Conferma*. There is no agent-side confirm tool.
-
-## Product rules implemented
+## Product rules
 
 - **Fail closed, honestly.** These cases return exactly *"Siamo spiacenti ma al momento non abbiamo persone sufficienti a soddisfare la richiesta."*:
-  - unknown skills
-  - lifestyle requests (Capoeira teacher, nails, dentist…), unless that skill is later added to the `skills` table
-  - other cities, or places outside the service area
-  - no available verified workers (at intake, at confirm, or when the cascade runs out)
-- **Pre-structured tasks.** Every job carries a deadline, step-by-step instructions, pay and proof requirements (min photos, GPS geofence, checklist questions). Workers never get a vague chat.
-- **Matching (Uber-style).** Hard filters come first: verified, active, online, has the skill, spare capacity, within 12 km, can make the deadline, and the supplier floor fits the budget. Workers who pass are scored:
-  - ETA 35%, rating 25%, completion 15%, skill experience 10%, price fit 10%, acceptance 5%
-  - a warning-tier worker loses 12 points
-  - every candidate carries a score breakdown.
-- **A2A negotiation.** One supplier agent per top-5 worker, each with a private floor (base × worker rate × urgency × distance) and a concession curve. Every step is persisted (`quotes` and `events`) and streamed live over SSE.
-  - The built-in buyer agent never exceeds max and trades a little price for match quality.
-  - The deal pool is every eligible worker who would work at the agreed price, ranked by score.
-- **Cascade.** Confirm creates an offer to #1 with `expires_at = now + TTL` (20s, adjustable in Ops). A loop runs every 2s:
-  - it expires unanswered offers and moves to the next worker
-  - Accept claims the job atomically and cancels any other pending offers
-  - an exhausted pool triggers one rescan for newly online workers, then `no_match` with the honest message and an escrow refund
-  - if a worker cancels after accepting, the job goes back into the cascade.
+  - lessons, beauty, medical, and certified plumbing, electrical or boiler work (Capoeira, nails, dentist…)
+  - other cities
+  - places outside the service area
+  - nobody capable
+- **Matching (Uber-style).**
+  - Hard filters: verified; not suspended; has the service; within 18 km; the partner's minimum rate fits; free at the slot (weekly availability, busy load vs capacity); online for jobs within 2h; warning tier kept off jobs above €150.
+  - Score: distance .25, rating .25, reliability .20, experience .15, timing .10, acceptance .05. Warning tier −12.
 - **Reliability (modelled on Uber).**
-  - Two-way ratings. The rating is the average of the last 100 rated jobs, with a Bayesian prior for new workers.
+  - Two-way ratings, averaged over a rolling window of the last 100 with a Bayesian prior.
   - Ratings tagged "not the worker's fault" are excluded.
-  - Warning tier (below ★4.6, <90% completion or >5% cancellations): ranked lower, no jobs above €50, and a banner in the app.
-  - Suspension (below ★4.4 over ≥10 ratings, <80% completion, or 3 no-shows): removed from matching, with the reasons shown. Ops can reinstate.
-  - Acceptance rate barely counts; completion and no-shows matter.
-- **Verification.** New signups (people or businesses with a P.IVA) stay `pending_verification` and cannot go online until Ops verifies them. The KYC/KYB check is a stub.
-- **Payments.** Escrow is a stub: `held` at confirm, `released` on verified proof, `refunded` or `partially_released` (30% fee once en route) on cancel. No real money moves.
+  - Warning and suspension tiers; Ops can reinstate.
+  - A no-show counts heavily.
+- **Verification.** New partners stay `pending_verification` until Ops verifies them (the KYC/KYB check is a stub).
 
 ## Seed data (Milano)
 
-There are 14 partners: 11 people and 3 businesses (FotoPunto Srl, Rapido Pony Express, Studio Rilievi Navigli).
+There are 17 partners:
 
-- **Giulia R.** (Brera, bike, ★4.97, 99% completion) is the clear #1 for shelf and store tasks near the Duomo.
+- **Giulia R.** (Brera, ★4.97) is the clear #1 for handyman, assembly and errands in the centre.
+- **Verde Navigli Snc** (crew of 3) leads gardening.
+- **Rho Staff Service Srl** (crew of 6, next to the Fiera) leads facchinaggio and event staff.
 - Davide C. is warning-tier and Francesca L. is suspended.
-- Chiara V. is pending verification, Paolo G. is offline, and Elena P. is new with 3 ratings.
+- Paolo G. works weekends only and Chiara V. is pending verification.
 
 ## Demo simulator (clearly labelled)
 

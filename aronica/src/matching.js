@@ -1,125 +1,162 @@
-// Uber-style matching: hard eligibility filters, then a weighted score where
-// ETA dominates, quality (rating, completion) comes next, acceptance barely
-// counts. Every candidate carries its score breakdown so agents and ops can
-// see *why* someone ranks where they do.
+// Matching v2: scheduled work. A partner is eligible if they are verified and
+// active, do the service, are near enough, accept the pay rate, and are *free*
+// for the slot (weekly availability minus overlapping assignments, times crew
+// capacity for businesses). Score is Uber-style and explainable.
 import { all, get } from './db.js';
 import { haversineKm, etaMinutes } from './geo.js';
 import { ratingStats, metrics, THRESHOLDS } from './reliability.js';
-import { clamp, round50, clock } from './util.js';
-import { getSkill } from './skills.js';
+import { getService } from './services.js';
+import { romeParts, minutesOfDay } from './time.js';
+import { clamp, clock } from './util.js';
 
-export const MAX_RADIUS_KM = 12;
+export const MAX_RADIUS_KM = 18;
 
-export const WEIGHTS = {
-  eta: 0.35,
-  rating: 0.25,
-  completion: 0.15,
-  experience: 0.1,
-  price: 0.1,
-  acceptance: 0.05,
-};
-const WARNING_PENALTY = 12; // points off a 0-100 score
+// Concentration limit: on shifts of 4+ people no single supplier covers more
+// than half the seats, so one no-show (e.g. an agency) can't sink the shift.
+export function maxSeatsPerSupplier(headcount) {
+  return headcount >= 4 ? Math.ceil(headcount / 2) : headcount;
+}
+export const WEIGHTS = { distance: 0.25, rating: 0.25, reliability: 0.2, experience: 0.15, timing: 0.1, acceptance: 0.05 };
+const WARNING_PENALTY = 12;
+const STEP = 30 * 60000;
 
-// What this worker's supplier agent will never go below for this job.
-export function supplierFloor(worker, job, skill, distanceKm) {
-  const minsToDeadline = (job.deadline_at - clock.now()) / 60000;
-  const urgent = job.mode !== 'schedule';
-  const urgency = !urgent ? 1 : minsToDeadline < 60 ? 1.35 : minsToDeadline < 180 ? 1.15 : 1;
-  const distance = 1 + Math.max(0, distanceKm - 2) * 0.04;
-  return round50(skill.base_price_cents * worker.rate_multiplier * urgency * distance);
+// Crew already committed by this worker in [start, end).
+export function busyLoad(workerId, start, end) {
+  const rows = all(
+    `SELECT a.crew, j.slot_start, j.duration_min FROM assignments a JOIN jobs j ON j.id = a.job_id
+     WHERE a.worker_id = ? AND a.status IN ('assigned','en_route','on_site')`, workerId,
+  );
+  return rows.filter((r) => r.slot_start < end && r.slot_start + r.duration_min * 60000 > start).reduce((a, r) => a + r.crew, 0);
 }
 
-export function activeJobCount(workerId) {
-  return get(
-    "SELECT COUNT(*) AS c FROM jobs WHERE assigned_worker_id = ? AND status IN ('assigned','en_route','on_site')",
-    workerId,
-  ).c;
+export function activeLoadNow(workerId) {
+  return get("SELECT COALESCE(SUM(crew),0) AS c FROM assignments WHERE worker_id = ? AND status IN ('en_route','on_site')", workerId).c;
 }
 
-export function scoreWorker(worker, job, skill) {
-  const here = { lat: worker.lat, lng: worker.lng };
-  const there = { lat: job.lat, lng: job.lng };
-  const distance_km = haversineKm(here, there);
-  const eta_min = etaMinutes(here, there, worker.vehicle);
-  const r = ratingStats(worker.id);
-  const m = metrics(worker);
-  const floor = supplierFloor(worker, job, skill, distance_km);
-  const expJobs = worker.skill_jobs?.[skill.code] ?? 0;
+function inAvailability(w, start, minutes) {
+  const p = romeParts(start);
+  const from = minutesOfDay(start);
+  const to = from + minutes;
+  return (w.availability?.[p.dow] ?? []).some(([a, b]) => from >= a && to <= b);
+}
 
+export function freeCapacity(w, start, minutes) {
+  if (!inAvailability(w, start, minutes)) return 0;
+  return Math.max(0, w.capacity - busyLoad(w.id, start, start + minutes * 60000));
+}
+
+// Earliest feasible start in [from, to] (start times on a 30-minute grid).
+export function earliestStart(w, from, to, minutes, earliestPossible) {
+  const grid = 15 * 60000;
+  let t = Math.ceil(Math.max(from, earliestPossible) / grid) * grid;
+  for (let i = 0; i < 400 && t <= to; i++, t += STEP) {
+    if (freeCapacity(w, t, minutes) > 0) return t;
+  }
+  return null;
+}
+
+export function scoreWorker(w, job, start) {
+  const distance_km = haversineKm(w, job);
+  const eta_min = etaMinutes(w, job, w.vehicle);
+  const r = ratingStats(w.id);
+  const m = metrics(w);
+  const exp = w.skill_jobs?.[job.service] ?? 0;
+  const windowLen = Math.max(1, job.window_end - job.window_start - job.duration_min * 60000);
   const parts = {
-    eta: 1 - clamp(eta_min / 60),
+    distance: 1 - clamp(distance_km / MAX_RADIUS_KM),
     rating: clamp((r.bayes_avg - 4.0) / 1.0),
-    completion: clamp((m.completion - 0.7) / 0.3),
-    experience: clamp(Math.log10(1 + expJobs) / 2),
-    price: job.budget_max_cents ? clamp(1 - floor / job.budget_max_cents + 0.5) : 0.5,
+    reliability: clamp((m.completion - 0.7) / 0.3) * (1 - clamp(w.no_shows / 3)),
+    experience: clamp(Math.log10(1 + exp) / 2),
+    timing: start == null ? 0 : 1 - clamp((start - job.window_start) / windowLen),
     acceptance: m.acceptance,
   };
   let score = 0;
-  for (const [k, w] of Object.entries(WEIGHTS)) score += parts[k] * w * 100;
-  if (worker.tier === 'warning') score -= WARNING_PENALTY;
+  for (const [k, wt] of Object.entries(WEIGHTS)) score += parts[k] * wt * 100;
+  if (w.tier === 'warning') score -= WARNING_PENALTY;
   return {
     score: Math.round(score * 10) / 10,
     breakdown: Object.fromEntries(Object.entries(parts).map(([k, v]) => [k, Math.round(v * 100) / 100])),
-    distance_km: Math.round(distance_km * 100) / 100,
+    distance_km: Math.round(distance_km * 10) / 10,
     eta_min,
-    floor_cents: floor,
     rating: Math.round(r.bayes_avg * 100) / 100,
-    rating_raw: r.raw_avg == null ? null : Math.round(r.raw_avg * 100) / 100,
     rating_count: r.total_count,
     completion: Math.round(m.completion * 1000) / 1000,
-    acceptance: Math.round(m.acceptance * 1000) / 1000,
-    experience_jobs: expJobs,
-    active_jobs: m.active_jobs,
+    experience_jobs: exp,
   };
 }
 
-// Returns { eligible: [...ranked], excluded: [{worker_id, reasons}] }
-export function rankCandidates(job, { excludeIds = [] } = {}) {
-  const skill = getSkill(job.skill);
-  if (!skill) return { eligible: [], excluded: [], skill: null };
+// job needs: service, lat, lng, window_start, window_end, duration_min, price (quote), flexible
+// opts.slotStart: only partners free at exactly that start.
+export function rankCandidates(job, { slotStart = null, excludeIds = [] } = {}) {
+  const service = getService(job.service);
+  if (!service) return { eligible: [], excluded: [], service: null };
   const now = clock.now();
+  const minutes = job.duration_min;
+  const seatPay = job.price?.seat_payout_cents ?? 0;
+  const perHour = seatPay / Math.max(0.5, minutes / 60);
+  const immediate = (slotStart ?? job.window_start) - now < 2 * 3600000;
   const eligible = [];
   const excluded = [];
-  for (const w of all('SELECT * FROM workers WHERE city = ?', job.city)) {
+  for (const w of all('SELECT * FROM workers WHERE city = ?', job.city ?? 'milano')) {
     const reasons = [];
     if (excludeIds.includes(w.id)) reasons.push('already_tried');
     if (w.status === 'suspended') reasons.push('suspended');
     if (w.status === 'pending_verification' || !w.verified) reasons.push('not_verified');
-    if (!w.online) reasons.push('offline');
-    if (!w.skills.includes(job.skill)) reasons.push('missing_skill');
-    const s = scoreWorker(w, job, skill);
-    if (s.active_jobs >= w.capacity) reasons.push('busy');
-    if (s.distance_km > MAX_RADIUS_KM) reasons.push('too_far');
-    if (job.mode !== 'schedule' && now + s.eta_min * 60000 > job.deadline_at) reasons.push('cannot_meet_deadline');
-    if (job.budget_max_cents && s.floor_cents > job.budget_max_cents) reasons.push('above_budget');
-    if (w.tier === 'warning' && (job.budget_max_cents ?? 0) > THRESHOLDS.high_value_cents) reasons.push('warning_tier_high_value');
-    if (reasons.length) excluded.push({ worker_id: w.id, reasons });
-    else eligible.push({ worker: w, ...s });
+    if (!w.skills.includes(job.service)) reasons.push('missing_service');
+    const distance = haversineKm(w, job);
+    if (distance > MAX_RADIUS_KM) reasons.push('too_far');
+    if (perHour < w.min_hourly_cents) reasons.push('pay_below_partner_minimum');
+    if (immediate && !w.online) reasons.push('offline');
+    if (w.tier === 'warning' && (job.price?.total_cents ?? 0) > THRESHOLDS.high_value_cents) reasons.push('warning_tier_high_value');
+    let start = null;
+    let capacity = 0;
+    if (!reasons.length) {
+      const eta = Math.round(haversineKm(w, job) * 1.3 / 14 * 60) + 10;
+      if (slotStart != null) {
+        capacity = freeCapacity(w, slotStart, minutes);
+        // A replacement may arrive late, but only within the first half of the job.
+        const arrive = Math.max(slotStart, now + eta * 60000);
+        start = capacity > 0 && arrive <= slotStart + (minutes * 60000) / 2 ? slotStart : null;
+      } else {
+        const last = job.flexible ? job.window_end - minutes * 60000 : job.window_start;
+        start = earliestStart(w, job.window_start, last, minutes, now + eta * 60000);
+        if (start != null) capacity = freeCapacity(w, start, minutes);
+      }
+      if (start == null) reasons.push('not_available');
+    }
+    if (reasons.length) { excluded.push({ worker_id: w.id, reasons }); continue; }
+    eligible.push({ worker: w, start, capacity_free: capacity, ...scoreWorker(w, job, start) });
   }
-  eligible.sort((a, b) => b.score - a.score || a.eta_min - b.eta_min);
+  eligible.sort((a, b) => b.score - a.score || a.start - b.start);
   eligible.forEach((c, i) => { c.rank = i + 1; });
-  return { eligible, excluded, skill };
+  return { eligible, excluded, service };
 }
 
-// Public, privacy-safe view of a candidate (what agents see).
+// Next availability after the window (for supplier counter-proposals).
+export function nextAvailability(w, job, horizonDays = 7) {
+  const from = job.window_end;
+  return earliestStart(w, from, from + horizonDays * 86400000, job.duration_min, clock.now() + 3600000);
+}
+
 export function publicCandidate(c) {
   const w = c.worker;
   return {
     worker_ref: w.id,
     alias: w.display_name,
     kind: w.kind,
+    crew_available: w.kind === 'business' ? c.capacity_free : 1,
     verified: !!w.verified,
+    insured: !!w.insured,
     tier: w.tier,
-    vehicle: w.vehicle,
     zone: w.zone,
     rank: c.rank,
     score: c.score,
     score_breakdown: c.breakdown,
-    eta_min: c.eta_min,
+    earliest_start: c.start ? new Date(c.start).toISOString() : null,
     distance_km: c.distance_km,
     rating: c.rating,
     rating_count: c.rating_count,
     completion_rate: c.completion,
-    jobs_in_skill: c.experience_jobs,
+    jobs_in_service: c.experience_jobs,
   };
 }
