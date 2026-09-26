@@ -1,0 +1,21 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "buildCommand": "",
+  "outputDirectory": "public",
+  "regions": ["fra1"],
+  "functions": {
+    "api/index.js": { "maxDuration": 60 }
+  },
+  "rewrites": [
+    { "source": "/v1/:path*", "destination": "/api/index?__p=v1/:path*" },
+    { "source": "/mcp", "destination": "/api/index?__p=mcp" },
+    { "source": "/openapi.json", "destination": "/api/index?__p=openapi.json" },
+    { "source": "/partner/v1/:path*", "destination": "/api/index?__p=partner/v1/:path*" },
+    { "source": "/media/:path*", "destination": "/api/index?__p=media/:path*" },
+    { "source": "/api/:path*", "destination": "/api/index?__p=api/:path*" }
+  ],
+  "headers": [
+    { "source": "/(.*)", "headers": [{ "key": "X-Content-Type-Options", "value": "nosniff" }] }
+  ]
+}

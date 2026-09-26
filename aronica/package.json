@@ -1,8 +1,8 @@
 {
   "name": "aronica",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "Aronica \u2014 Agent\u2192Human dispatch layer. AI agents hire verified people for physical tasks in Milano.",
+  "description": "Aronica: the physical hand of personal AI assistants in Milano. Agent connector (MCP/REST), partner app, ops, dispatch engine.",
   "type": "module",
   "engines": {
     "node": ">=22.5"
@@ -11,16 +11,19 @@
     "aronica-mcp": "bin/aronica-mcp-stdio.js"
   },
   "scripts": {
-    "start": "node --no-warnings=ExperimentalWarning src/server.js",
-    "dev": "node --no-warnings=ExperimentalWarning --watch src/server.js",
-    "seed": "node --no-warnings=ExperimentalWarning src/seed.js --reset",
+    "start": "node --no-warnings=ExperimentalWarning server/local.js",
+    "dev": "node --no-warnings=ExperimentalWarning --watch server/local.js",
+    "seed": "node --no-warnings=ExperimentalWarning core/seed.js --reset",
     "test": "node --no-warnings=ExperimentalWarning --test test/*.test.js",
+    "test:pg": "ARONICA_TEST_DB=pglite node --no-warnings=ExperimentalWarning --test test/*.test.js",
     "demo:agent": "node examples/buyer-agent.js",
-    "build:demo": "node demo/build.mjs"
+    "schema:sql": "node core/schema-sql.js"
   },
   "devDependencies": {
-    "buffer": "^6.0.3",
-    "esbuild": "^0.25.12",
-    "sql.js": "^1.14.2"
+    "@electric-sql/pglite": "^0.5.8"
+  },
+  "dependencies": {
+    "@vercel/functions": "^3.9.9",
+    "pg": "^8.23.0"
   }
 }

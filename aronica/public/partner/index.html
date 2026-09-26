@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Crect width=%2216%22 height=%2216%22 rx=%224%22/%3E%3Ccircle cx=%228%22 cy=%228%22 r=%223.5%22 fill=%22white%22/%3E%3C/svg%3E">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#121212">
+  <link rel="manifest" href="/partner/manifest.webmanifest">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>Aronica Partner</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+  <link rel="stylesheet" href="/shared/app.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+</head>
+<body class="theme-dark">
+  <div id="root" class="w-host"></div>
+  <script type="module">
+    import { mountWorker } from '/partner/app.js';
+    mountWorker(document.getElementById('root'));
+  </script>
+</body>
+</html>

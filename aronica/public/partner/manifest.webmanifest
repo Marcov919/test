@@ -1,0 +1,12 @@
+{
+  "name": "Aronica Partner",
+  "short_name": "Aronica",
+  "description": "Incarichi strutturati a Milano: offerte a tempo, Accetto / Rifiuto, prova con foto e GPS.",
+  "start_url": "/partner/",
+  "scope": "/partner/",
+  "display": "standalone",
+  "background_color": "#121212",
+  "theme_color": "#121212",
+  "lang": "it",
+  "icons": [{ "src": "/partner/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}

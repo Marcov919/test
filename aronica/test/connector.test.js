@@ -1,26 +1,21 @@
 // HTTP-level tests: MCP protocol, REST auth, OpenAPI, tools.json, fail-closed over the wire.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 
 process.env.ARONICA_NEG_DELAY_MS = '0';
-process.env.ARONICA_UPLOADS = mkdtempSync(join(tmpdir(), 'aronica-up-'));
-const { boot } = await import('../src/server.js');
+const { boot } = await import('../server/local.js');
 
-let server;
+let app;
 let B;
 const hdr = (key) => ({ Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' });
 const K = hdr('ak_demo_milano');
 const KB = hdr('ak_demo_business');
 
 before(async () => {
-  const r = await boot({ dbPath: ':memory:', port: 0, loop: false });
-  server = r.server;
-  B = `http://127.0.0.1:${r.port}`;
+  app = await boot({ db: process.env.ARONICA_TEST_DB ?? ':memory:', port: 0, loop: false });
+  B = `http://127.0.0.1:${app.port}`;
 });
-after(() => server.close());
+after(() => app.close());
 
 const rpc = async (body, headers = K) => {
   const res = await fetch(`${B}/mcp`, { method: 'POST', headers, body: JSON.stringify(body) });
@@ -55,7 +50,7 @@ test('MCP: personal assistant books a car wash (compile → supply → negotiate
   assert.equal(created.isError, false, JSON.stringify(created.structuredContent));
   const neg = await call('auto_negotiate', { job_id: created.structuredContent.job.id });
   assert.equal(neg.structuredContent.auto_approved, false);
-  assert.match(neg.structuredContent.confirm_url, /\/buyer#\/job\/job_/);
+  assert.match(neg.structuredContent.confirm_url, /\/confirm\/#\/job\/job_/);
 });
 
 test('MCP: company agent books 4 facchini at Fiera Rho, auto-approved and dispatched', async () => {

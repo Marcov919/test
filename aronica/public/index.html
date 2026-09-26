@@ -5,7 +5,7 @@
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Crect width=%2216%22 height=%2216%22 rx=%224%22/%3E%3Ccircle cx=%228%22 cy=%228%22 r=%223.5%22 fill=%22white%22/%3E%3C/svg%3E">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Aronica</title>
-  <link rel="stylesheet" href="/css/app.css">
+  <link rel="stylesheet" href="/shared/app.css">
   <style>
     .wrap { max-width: 980px; margin: 0 auto; padding: 28px 20px 60px; }
     .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; margin-top: 28px; }
@@ -20,19 +20,22 @@
 </head>
 <body>
   <div class="wrap">
-    <div class="row between"><span class="logo"><i></i>Aronica</span><span class="badge">Milano · v1</span></div>
-    <h1 style="font-size:40px;margin-top:40px;max-width:760px">Cosa ti serve, a Milano?</h1>
-    <p class="muted" style="font-size:18px;max-width:700px">Scrivilo come al tuo assistente. Incarico preciso, prezzo fisso, persone o attività verificate. Auto all'autolavaggio, qualcuno che aspetti il tecnico, un ritiro in farmacia: quando il software non basta, Aronica manda qualcuno di vero.</p>
+    <div class="row between"><span class="logo"><i></i>Aronica</span><span class="badge">Milano · demo</span></div>
+    <h1 style="font-size:40px;margin-top:40px;max-width:760px">La mano fisica del tuo assistente AI.</h1>
+    <p class="muted" style="font-size:18px;max-width:720px">Parli già con un assistente AI. Quando serve qualcuno di vero, per esempio portare l'auto a lavare, aspettare il tecnico o ritirare un farmaco, l'assistente chiede ad Aronica. Ricevi un incarico preciso a prezzo fisso, gli agenti concordano lo slot, tu confermi con un tap e una persona o un'attività verificata lo esegue con la prova.</p>
+    <h3 style="margin-top:34px">Tre prodotti, un'unica piattaforma</h3>
     <div class="tiles">
-      <a class="tile dark" href="/buyer"><b style="font-size:20px">Buyer console</b><span class="muted">Scrivi cosa ti serve, vedi chi è disponibile, conferma Adesso o Programma con un tap.</span></a>
-      <a class="tile" href="/worker"><b style="font-size:20px">App Partner</b><span class="muted">Persone e attività locali (es. Wash&amp;Go Navigli): vai online, offerta a tempo, Accetto / Rifiuto, foto di prova.</span></a>
-      <a class="tile" href="/docs"><b style="font-size:20px">Agent Connector</b><span class="muted">MCP, REST, OpenAPI, function calling: Claude, Grok, OpenAI e altri.</span></a>
-      <a class="tile" href="/ops"><b style="font-size:20px">Ops</b><span class="muted">Classifica spiegata, offerte e TTL, cascata, affidabilità, log eventi.</span></a>
+      <a class="tile dark" href="/assistant/"><span class="xs" style="color:#bbb">Lato domanda · demo</span><b style="font-size:20px">Assistente (simulato)</b><span class="muted">Rappresenta un assistente come Muse, Instinct o ChatGPT: una chat con un agente scriptato. Le carte Aronica compaiono dentro la conversazione: Adesso / Programma, conferma, stato in tempo reale, prova.</span></a>
+      <a class="tile" href="/partner/"><span class="xs faint">Lato offerta · app</span><b style="font-size:20px">App partner</b><span class="muted">Per persone e attività locali (es. Wash&amp;Go Navigli): vai online, ricevi l'offerta a tempo, Accetto / Rifiuto, foto di prova. È una PWA installabile.</span></a>
+      <a class="tile" href="/docs/"><span class="xs faint">Connettore</span><b style="font-size:20px">Per agenti e piattaforme</b><span class="muted">MCP, REST, OpenAPI, function calling. È il contratto che integra Claude, ChatGPT, Grok e Meta.</span></a>
+      <a class="tile" href="/ops/"><span class="xs faint">Interno</span><b style="font-size:20px">Ops</b><span class="muted">Classifica spiegata, offerte e TTL, cascata, affidabilità, verifiche, orologio della demo.</span></a>
     </div>
     <div class="flow">
-      <span class="step">"Porta la mia auto a lavare sabato"</span>→<span class="step">Incarico a prezzo fisso</span>→<span class="step">Partner disponibili</span>→<span class="step">A2A sullo slot</span>→<span class="step">Conferma: Adesso / Programma</span>→<span class="step">Offerta a tempo · cascata</span>→<span class="step">Foto targa, prima e dopo</span>→<span class="step">Fatto</span>
+      <span class="step">"Porta la mia auto a lavare sabato"</span>→<span class="step">Incarico a prezzo fisso</span>→<span class="step">Partner disponibili</span>→<span class="step">Adesso / Programma</span>→<span class="step">A2A sullo slot</span>→<span class="step">Conferma</span>→<span class="step">Offerta a tempo · cascata</span>→<span class="step">Foto e GPS</span>→<span class="step">Fatto</span>
     </div>
-    <p class="small muted" style="margin-top:30px">Demo: solo Milano, dati seed, partner seed simulati, escrow/pagamenti e verifica documenti stub (nessun addebito reale). Chiave API demo: <code>ak_demo_milano</code> (aziende, sperimentale: <code>ak_demo_business</code>).</p>
+    <p class="small muted" style="margin-top:30px"><b>Prova la demo su due dispositivi.</b> Apri l'app partner sul telefono ed entra come <i>Wash&amp;Go Navigli Snc</i>. Poi, dall'assistente sul computer, chiedi l'autolavaggio. L'offerta arriva al telefono in pochi secondi.</p>
+    <p class="small muted"><b>Cosa è simulato.</b> L'agente dell'assistente è uno script senza LLM. Anche i supplier agent girano lato server. I partner seed che nessuno sta usando rispondono da soli e mandano foto marcate "FOTO SIMULATA". Escrow, pagamenti e verifica documenti sono stub, quindi nessun addebito è reale. Solo Milano.</p>
+    <p class="small muted">Chiave API demo: <code>ak_demo_milano</code>. Il link di conferma che ricevono gli agenti apre <a href="/confirm/">/confirm</a>.</p>
   </div>
 </body>
 </html>

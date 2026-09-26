@@ -1,0 +1,53 @@
+/* Simulated assistant (the demand side's own UI, not Aronica's). Neutral look:
+   it stands in for any assistant app; the Aronica card inside is the connector. */
+:root { --as-accent: #5b5bd6; --as-user: #5b5bd6; --as-bubble: #f1f1f4; }
+body { background: #fafafb; }
+.as-shell { max-width: 560px; margin: 0 auto; height: 100dvh; display: flex; flex-direction: column; background: #fff; box-shadow: 0 0 0 1px #0000000d; }
+.as-top { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+.as-id { display: flex; align-items: center; gap: 10px; }
+.as-dot { width: 32px; height: 32px; border-radius: 50%; background: radial-gradient(circle at 30% 30%, #9d9df3, var(--as-accent)); flex: none; }
+.as-chat { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+.as-chat > * { flex-shrink: 0; }
+.as-msg { max-width: 86%; padding: 10px 14px; border-radius: 18px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.as-msg.user { align-self: flex-end; background: var(--as-user); color: #fff; border-bottom-right-radius: 6px; }
+.as-msg.bot { align-self: flex-start; background: var(--as-bubble); border-bottom-left-radius: 6px; }
+.as-msg.sys { align-self: center; background: none; color: var(--fg-3); font-size: 12px; padding: 2px 8px; text-align: center; }
+.as-typing { align-self: flex-start; color: var(--fg-3); font-size: 13px; padding: 4px 6px; }
+.as-trace { align-self: flex-start; font-size: 12px; color: var(--fg-3); margin-top: -4px; }
+.as-trace summary { cursor: pointer; list-style: none; }
+.as-trace summary::-webkit-details-marker { display: none; }
+.as-trace code { display: inline-block; background: var(--bg-2); border-radius: 6px; padding: 1px 6px; margin: 2px 4px 0 0; font-size: 11px; }
+.as-trace code.err { color: var(--danger); }
+/* Aronica card (the connector's UI inside the assistant) */
+.ar-card { align-self: stretch; border: 1px solid var(--line); border-radius: 16px; background: #fff; overflow: hidden; box-shadow: var(--shadow-sm); }
+.ar-card .ar-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 14px; background: #000; color: #fff; font-size: 12px; }
+.ar-card .ar-head .logo { font-size: 14px; color: #fff; }
+.ar-card .ar-body { padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+.ar-title { font-weight: 700; font-size: 17px; letter-spacing: -.01em; }
+.ar-row { display: flex; gap: 8px; align-items: center; }
+.ar-row.between { justify-content: space-between; }
+.ar-price { font-size: 26px; font-weight: 700; letter-spacing: -.02em; }
+.ar-opts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.ar-opt { text-align: left; border: 1.5px solid var(--line); background: #fff; border-radius: 12px; padding: 10px 12px; cursor: pointer; display: flex; flex-direction: column; gap: 2px; }
+.ar-opt:hover:not(:disabled) { border-color: #000; }
+.ar-opt:disabled { opacity: .45; cursor: not-allowed; }
+.ar-opt b { font-size: 15px; }
+.ar-partner { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; border-top: 1px solid var(--line); }
+.ar-partner:first-child { border-top: 0; }
+.ar-steps { display: flex; flex-direction: column; gap: 6px; }
+.ar-step { display: flex; gap: 8px; align-items: center; font-size: 14px; color: var(--fg-3); }
+.ar-step.on { color: var(--fg); font-weight: 600; }
+.ar-step.done { color: var(--accent-ink); }
+.ar-step .dotx { width: 10px; height: 10px; border-radius: 50%; background: var(--line); flex: none; }
+.ar-step.on .dotx { background: var(--blue); box-shadow: 0 0 0 4px #276ef133; }
+.ar-step.done .dotx { background: var(--accent); }
+.ar-stars { display: flex; gap: 4px; }
+.ar-stars button { border: 0; background: none; font-size: 26px; cursor: pointer; color: #d4d4d4; padding: 0; }
+.ar-stars button.on { color: #000; }
+.as-foot { border-top: 1px solid var(--line); padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: 8px; }
+.as-sugg { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 2px; }
+.as-sugg .chip { white-space: nowrap; }
+.as-input { display: flex; gap: 8px; align-items: flex-end; }
+.as-input textarea { flex: 1; resize: none; border: 1px solid var(--line); border-radius: 20px; padding: 10px 14px; max-height: 120px; background: var(--bg-2); }
+.as-input .btn { border-radius: 20px; }
+@media (max-width: 420px) { .ar-opts { grid-template-columns: 1fr; } }
