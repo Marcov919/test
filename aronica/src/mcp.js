@@ -7,9 +7,9 @@ import { HttpError, token } from './util.js';
 const SUPPORTED = ['2025-06-18', '2025-03-26', '2024-11-05'];
 export const SERVER_INFO = { name: 'aronica', title: 'Aronica — hire verified people in Milano', version: '0.2.0' };
 
-const INSTRUCTIONS = `Aronica dispatches verified people and small businesses in Milano for physical work: home services a personal assistant plans (gardening, furniture assembly, handyman, cleaning, waiting at home for a technician/courier, errands with purchase) and one-shot business work (load-in crews and event staff at Fiera Rho/MiCo, short-let turnover, photo inspections, retail checks).
-Flow: compile_task (turn the user's words into a structured job with a FIXED price and open questions; confirm them with the user) → create_job → negotiate / auto_negotiate (supplier agents reply on WHEN: accept, counter-slot, decline) → accept_quote → consumer: give confirm_url to your human · business: auto-approved under the company policy → wait_for_update → get_job (seats, contracts, proof, invoice) → rate_worker.
-Out-of-scope or no available partners fail closed with an honest message. Never promise a person before seats are filled.`;
+const INSTRUCTIONS = `Aronica is the physical hand of a personal AI assistant in Milano: when software can't finish, it dispatches a verified local person or small business, at a fixed price, with proof. Main uses: car wash (pick-up & return or mobile wash), waiting at home for a technician/courier, local pick-up & drop-off (pharmacy, keys, envelope; max 3 km), IKEA assembly/small handyman. Business staffing is experimental.
+Flow: compile_task (user's words → structured job with FIXED price and open questions; confirm them with the user) → search_supply (who is actually available, ranked) → create_job → negotiate / auto_negotiate (supplier agents reply on WHEN: accept, counter-slot, decline) → accept_quote → give confirm_url to your human (one tap; mode now = Adesso, scheduled = Programma) → wait_for_update → get_job (proof) → rate_worker.
+Out-of-scope (e.g. lessons/teachers like Capoeira), other cities or no available partners fail closed with an honest message and a reason. Never promise a person before a partner has accepted. Supplier agents, escrow and KYC are simulated/stubbed in this build.`;
 
 function rpcResult(idv, result) { return { jsonrpc: '2.0', id: idv, result }; }
 function rpcError(idv, code, message, data) { return { jsonrpc: '2.0', id: idv ?? null, error: { code, message, ...(data ? { data } : {}) } }; }

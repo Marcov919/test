@@ -130,7 +130,7 @@ async function renderLogin() {
     avatar(w.display_name, w.avatar_color, w.kind === 'business' ? 'sq' : ''),
     h('div.grow', {},
       h('div.row', {}, h('b', {}, w.display_name), w.kind === 'business' ? h('span.badge', {}, 'Business') : null),
-      h('div.small.muted', {}, `${w.zone} · ${VEHICLE_IT[w.vehicle]} · ${w.skills.length} competenze`)),
+      h('div.small.muted', {}, `${w.zone} · ${w.skills.slice(0, 3).map((c) => cfg?.services.find((x) => x.code === c)?.name_it ?? c).join(', ')}${w.skills.length > 3 ? '…' : ''}`)),
     statusBadge(w), icon('chevron'));
   mount(root, h('div.w-login', {}, h('div.inner', {},
     h('div.row.between', {}, h('span.logo', {}, h('i'), 'Aronica ', h('span.faint', { style: { fontWeight: 600 } }, 'Partner')), demo ? null : h('a.small.muted', { href: '/' }, 'Home')),
@@ -368,7 +368,7 @@ function showOffer(o) {
 function proofBadges(p) {
   return p.kind === 'timesheet'
     ? [h('span.badge', {}, icon('clock'), 'Check-in e check-out'), h('span.badge', {}, icon('pin'), `GPS entro ${p.gps_radius_m} m`)]
-    : [h('span.badge', {}, icon('camera'), `${p.photos_min} foto`), h('span.badge', {}, icon('pin'), `GPS entro ${p.gps_radius_m} m`), h('span.badge', {}, icon('list'), `${p.checklist.length} domande`)];
+    : [h('span.badge', {}, icon('camera'), p.shots?.length ? `Foto: ${p.shots.join(' · ')}` : `${p.photos_min} foto`), h('span.badge', {}, icon('pin'), `GPS entro ${p.gps_radius_m} m`), h('span.badge', {}, icon('list'), `${p.checklist.length} domande`)];
 }
 
 function closeOffer() {
@@ -488,9 +488,10 @@ function showProof(job) {
   const fileIn = h('input', { type: 'file', accept: 'image/*', capture: 'environment', multiple: true, style: { display: 'none' } });
   const drawPhotos = () => {
     mount(grid,
-      photos.map((p, i) => h('div', { style: { position: 'relative' } }, h('img', { src: p, alt: `Foto ${i + 1}` }),
+      photos.map((p, i) => h('div', { style: { position: 'relative' } }, h('img', { src: p, alt: req.shots?.[i] ?? `Foto ${i + 1}` }),
+        req.shots?.[i] ? h('span.xs', { style: { position: 'absolute', left: '4px', bottom: '4px', background: 'rgba(0,0,0,.65)', color: '#fff', padding: '1px 6px', borderRadius: '6px' } }, req.shots[i]) : null,
         h('button.btn.sm', { style: { position: 'absolute', top: '4px', right: '4px', padding: '4px' }, onclick: () => { photos.splice(i, 1); drawPhotos(); } }, icon('x')))),
-      h('div.slot', { onclick: () => fileIn.click() }, h('div.center', {}, icon('camera'), h('div.xs', {}, 'Scatta'))));
+      h('div.slot', { onclick: () => fileIn.click() }, h('div.center', {}, icon('camera'), h('div.xs', {}, req.shots?.[photos.length] ?? 'Scatta'))));
     counter.textContent = `${photos.length}/${req.photos_min} foto`;
     counter.className = photos.length >= req.photos_min ? 'badge green' : 'badge';
   };

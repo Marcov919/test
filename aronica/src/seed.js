@@ -1,5 +1,7 @@
-// Milano seed data (v2): people and small businesses for home services and
-// one-shot business work, with weekly availability and reliability histories.
+// Milano seed data (v1.1): local people and small businesses that unblock a
+// private person's day (car wash, waiting at home, errands, IKEA), plus the
+// experimental business-staffing supply. Weekly availability and reliability
+// histories are seeded; there is deliberately zero supply for lessons/lifestyle.
 import { fileURLToPath } from 'node:url';
 import { rmSync } from 'node:fs';
 import { db, openDb, insert, setSetting, get } from './db.js';
@@ -11,6 +13,7 @@ export const DEMO_API_KEY = 'ak_demo_milano';
 export const DEMO_BUSINESS_KEY = 'ak_demo_business';
 export const CONSOLE_ACCOUNT = 'acc_console';
 export const CONSOLE_BUSINESS_ACCOUNT = 'acc_console_biz';
+export const SEED_VERSION = 3; // bump to reseed databases created by older versions
 
 const ORG = {
   legal_name: 'Aurora Eventi & Hospitality Srl', vat_id: 'IT11223344556', sdi: 'M5UXCR1', employees: 8,
@@ -47,9 +50,19 @@ const MON_SAT = [1, 2, 3, 4, 5, 6];
 const ALL = [0, 1, 2, 3, 4, 5, 6];
 
 const W = [
+  { id: 'b_washgo', kind: 'business', name: 'Wash&Go Navigli Snc', legal: 'Wash&Go Navigli di Ferri e Colombo Snc', vat: 'IT08811223344', zone: 'Navigli', lat: 45.4508, lng: 9.1762, vehicle: 'car', capacity: 3,
+    skills: ['lavaggio_auto'], skill_jobs: { lavaggio_auto: 640 },
+    availability: avail(MON_SAT, 8, 19), min_hourly: 1800, avg: 4.95, n: 100, offers: [700, 668], jobs: [668, 662, 6, 0], color: '#0b7285', insured: 1,
+    notes: { lavaggio_auto: 'Autista viene a prendere l\'auto, lavaggio a mano in sede (Alzaia Naviglio Grande), riconsegna nello stesso punto.' },
+    bio: 'Autolavaggio a mano sui Navigli. Ritiro e riconsegna con autista assicurato. Lun–sab 8–19.' },
+  { id: 'b_autospa', kind: 'business', name: 'AutoSpa Porta Romana Srl', legal: 'AutoSpa Porta Romana Srl', vat: 'IT09900112233', zone: 'Porta Romana', lat: 45.4508, lng: 9.2048, vehicle: 'car', capacity: 2,
+    skills: ['lavaggio_auto'], skill_jobs: { lavaggio_auto: 310 },
+    availability: avail(ALL, 8, 20), min_hourly: 2000, avg: 4.78, n: 100, offers: [380, 330], jobs: [330, 322, 8, 0], color: '#5f3dc4', insured: 1,
+    notes: { lavaggio_auto: 'Ritiro con autista, lavaggio e igienizzazione in sede, riconsegna.' },
+    bio: 'Car care e igienizzazione interni. Aperto anche la domenica.' },
   { id: 'w_giulia', kind: 'person', name: 'Giulia R.', zone: 'Brera', lat: 45.4702, lng: 9.1878, vehicle: 'bike',
-    skills: ['tuttofare', 'montaggio_mobili', 'attesa_in_casa', 'commissione_acquisto', 'staff_eventi'],
-    skill_jobs: { tuttofare: 120, montaggio_mobili: 90, attesa_in_casa: 40, commissione_acquisto: 35, staff_eventi: 20 },
+    skills: ['tuttofare', 'montaggio_mobili', 'attesa_in_casa', 'ritiro_consegna', 'commissione_acquisto', 'staff_eventi'],
+    skill_jobs: { tuttofare: 120, montaggio_mobili: 90, attesa_in_casa: 40, ritiro_consegna: 60, commissione_acquisto: 35, staff_eventi: 20 },
     availability: avail(MON_SAT, 8, 20), min_hourly: 1200, avg: 4.97, n: 100, offers: [340, 327], jobs: [318, 316, 2, 0], color: '#1f8a70', insured: 1,
     bio: 'Tuttofare con attrezzi propri. Montaggi IKEA in metà tempo.' },
   { id: 'b_verde', kind: 'business', name: 'Verde Navigli Snc', legal: 'Verde Navigli di Conti e Bassi Snc', vat: 'IT07788990011', zone: 'Navigli', lat: 45.4522, lng: 9.1735, vehicle: 'car', capacity: 3,
@@ -57,15 +70,16 @@ const W = [
     availability: avail(MON_SAT, 7, 18), min_hourly: 1800, avg: 4.93, n: 100, offers: [460, 420], jobs: [420, 414, 6, 0], color: '#2b8a3e', insured: 1,
     bio: 'Giardinieri dal 1998. Furgone, decespugliatori, smaltimento verde autorizzato.' },
   { id: 'w_luca', kind: 'person', name: 'Luca F.', zone: 'CityLife', lat: 45.4776, lng: 9.1558, vehicle: 'car',
-    skills: ['giardinaggio', 'montaggio_mobili', 'facchinaggio_allestimento'], skill_jobs: { giardinaggio: 45, montaggio_mobili: 60, facchinaggio_allestimento: 30 },
+    skills: ['lavaggio_auto', 'montaggio_mobili', 'giardinaggio', 'facchinaggio_allestimento'], skill_jobs: { lavaggio_auto: 180, montaggio_mobili: 60, giardinaggio: 45, facchinaggio_allestimento: 30 },
     availability: avail([2, 3, 4, 5, 6, 0], 8, 18), min_hourly: 1500, avg: 4.86, n: 100, offers: [140, 122], jobs: [122, 118, 4, 0], color: '#0c8599',
-    bio: 'Auto con portapacchi, patentino muletto.' },
+    notes: { lavaggio_auto: 'Vengo io con il carrello mobile (acqua e corrente autonomi): lavaggio sotto casa, l\'auto non si sposta.' },
+    bio: 'Lavaggio auto a domicilio con carrello mobile. Anche montaggi, patentino muletto.' },
   { id: 'w_ahmed', kind: 'person', name: 'Ahmed K.', zone: 'NoLo', lat: 45.4958, lng: 9.2168, vehicle: 'scooter',
-    skills: ['facchinaggio_allestimento', 'montaggio_mobili', 'commissione_acquisto', 'attesa_in_casa'], skill_jobs: { facchinaggio_allestimento: 70, montaggio_mobili: 20, commissione_acquisto: 25, attesa_in_casa: 10 },
+    skills: ['ritiro_consegna', 'attesa_in_casa', 'commissione_acquisto', 'facchinaggio_allestimento', 'montaggio_mobili'], skill_jobs: { ritiro_consegna: 140, attesa_in_casa: 30, commissione_acquisto: 25, facchinaggio_allestimento: 70, montaggio_mobili: 20 },
     availability: avail(ALL, 6, 22), min_hourly: 1100, avg: 4.81, n: 95, offers: [120, 95], jobs: [98, 94, 4, 0], color: '#e8590c', bio: 'Disponibile anche la sera e nel weekend.' },
   { id: 'w_sara', kind: 'person', name: 'Sara M.', zone: 'Navigli', lat: 45.4525, lng: 9.1742, vehicle: 'bike',
-    skills: ['staff_eventi', 'sopralluogo_foto', 'verifica_punto_vendita'], skill_jobs: { staff_eventi: 140, sopralluogo_foto: 30, verifica_punto_vendita: 50 },
-    availability: avail([3, 4, 5, 6, 0], 8, 23), min_hourly: 1500, avg: 4.93, n: 100, offers: [165, 150], jobs: [152, 150, 2, 0], color: '#c2255c', bio: 'Hostess congressuale, inglese e francese.' },
+    skills: ['attesa_in_casa', 'ritiro_consegna', 'staff_eventi'], skill_jobs: { attesa_in_casa: 85, ritiro_consegna: 70, staff_eventi: 140 },
+    availability: avail([3, 4, 5, 6, 0], 8, 23), min_hourly: 1300, avg: 4.93, n: 100, offers: [165, 150], jobs: [152, 150, 2, 0], color: '#c2255c', bio: 'Studentessa ai Navigli: attese a casa, ritiri in zona, qualche evento.' },
   { id: 'w_marco', kind: 'person', name: 'Marco B.', zone: 'Porta Venezia', lat: 45.4748, lng: 9.2062, vehicle: 'scooter',
     skills: ['facchinaggio_allestimento', 'staff_eventi', 'attesa_in_casa'], skill_jobs: { facchinaggio_allestimento: 110, staff_eventi: 60, attesa_in_casa: 15 },
     availability: avail(MON_SAT, 6, 20), min_hourly: 1200, avg: 4.89, n: 100, offers: [240, 211], jobs: [212, 206, 4, 0], color: '#3b5bdb', bio: 'Allestimenti fieristici da 5 anni.' },
@@ -89,9 +103,6 @@ const W = [
   { id: 'w_tommaso', kind: 'person', name: 'Tommaso D.', zone: 'Lambrate', lat: 45.4842, lng: 9.2372, vehicle: 'bike',
     skills: ['facchinaggio_allestimento', 'staff_eventi', 'montaggio_mobili'], skill_jobs: { facchinaggio_allestimento: 30, staff_eventi: 25, montaggio_mobili: 15 },
     availability: avail(ALL, 7, 20), min_hourly: 1200, avg: 4.78, n: 70, offers: [110, 77], jobs: [72, 70, 2, 0], color: '#5c940d', bio: '' },
-  { id: 'b_rilievi', kind: 'business', name: 'Studio Rilievi Navigli', legal: 'Studio Rilievi Navigli di A. Conti', vat: 'IT04567890123', zone: 'Porta Genova', lat: 45.4538, lng: 9.1708, vehicle: 'car', capacity: 2,
-    skills: ['sopralluogo_foto', 'verifica_punto_vendita'], skill_jobs: { sopralluogo_foto: 45, verifica_punto_vendita: 15 },
-    availability: avail(WEEK, 9, 18), min_hourly: 2000, avg: 4.95, n: 60, offers: [70, 62], jobs: [62, 61, 1, 0], color: '#364fc7', insured: 1, bio: 'Geometri: sopralluoghi con report.' },
   { id: 'w_davide', kind: 'person', name: 'Davide C.', zone: 'Porta Romana', lat: 45.4523, lng: 9.2021, vehicle: 'scooter',
     skills: ['facchinaggio_allestimento', 'montaggio_mobili', 'attesa_in_casa'], skill_jobs: { facchinaggio_allestimento: 25, montaggio_mobili: 15, attesa_in_casa: 3 },
     availability: avail(ALL, 7, 21), min_hourly: 900, avg: 4.52, n: 40, offers: [80, 56], jobs: [50, 43, 6, 1], color: '#868e96', bio: 'Economico ma discontinuo.' },
@@ -110,6 +121,9 @@ export function seed({ reset = false } = {}) {
   if (reset) {
     for (const t of ['events', 'offers', 'quotes', 'assignments', 'jobs', 'ratings', 'workers', 'accounts', 'services', 'settings']) db.exec(`DELETE FROM ${t}`);
   }
+  let version = 0;
+  try { version = Number(get("SELECT value FROM settings WHERE key = 'seed_version'")?.value ?? 0); } catch { /* */ }
+  if (!reset && version !== SEED_VERSION && get('SELECT COUNT(*) AS c FROM workers').c > 0) return seed({ reset: true });
   if (get('SELECT COUNT(*) AS c FROM workers').c > 0) return false;
   const now = Date.now();
   for (const s of SERVICE_SEED) {
@@ -123,6 +137,7 @@ export function seed({ reset = false } = {}) {
   insert('accounts', { id: 'acc_demo_business', name: 'Agente di Aurora Eventi (demo)', kind: 'business', api_key: DEMO_BUSINESS_KEY, org: ORG, created_at: now });
   insert('accounts', { id: CONSOLE_ACCOUNT, name: 'Privato', kind: 'consumer', api_key: null, org: null, created_at: now });
   insert('accounts', { id: CONSOLE_BUSINESS_ACCOUNT, name: 'Aurora Eventi', kind: 'business', api_key: null, org: ORG, created_at: now });
+  setSetting('seed_version', SEED_VERSION);
   setSetting('offer_ttl_s', 20);
   setSetting('simulate_workers', true);
   setSetting('sim_speedup', 30);
@@ -139,7 +154,7 @@ export function seed({ reset = false } = {}) {
       offers_received: w.offers[0], offers_accepted: w.offers[1], offers_declined: Math.round((w.offers[0] - w.offers[1]) * 0.6),
       offers_expired: Math.round((w.offers[0] - w.offers[1]) * 0.4),
       jobs_accepted: w.jobs[0], jobs_completed: w.jobs[1], jobs_cancelled: w.jobs[2], no_shows: w.jobs[3],
-      earnings_cents: w.jobs[1] * 4200, avatar_color: w.color, simulated: 1, token: token(), joined_at: now - 200 * 86400000,
+      earnings_cents: w.jobs[1] * 4200, avatar_color: w.color, service_notes: w.notes ?? {}, simulated: 1, token: token(), joined_at: now - 200 * 86400000,
     });
     starHistory(w.n, w.avg, rnd).forEach((s, i) => insert('ratings', {
       id: `r_seed_${w.id}_${i}`, job_id: null, worker_id: w.id, stars: s, tags: [], comment: null, excluded: 0,

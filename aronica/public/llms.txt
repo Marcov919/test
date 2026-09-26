@@ -1,12 +1,14 @@
 # Aronica
 
-> Agent-to-Human dispatch for Milano: the physical step of an agentic flow. Personal assistants book home services (gardening, furniture assembly, handyman, cleaning, waiting at home for a technician or courier, errands with purchase); company agents hire one-shot staff (load-in crews and event staff at Fiera Rho and MiCo, short-let turnover, photo inspections, retail checks). Verified partners, fixed prices, guaranteed replacement on no-show.
+> The physical hand of a personal AI assistant in Milano. When software can't finish, Aronica dispatches a verified local person or small business at a fixed price, with proof: car wash (pick-up & return or mobile wash), waiting at home for a technician or courier, local pick-up & drop-off (pharmacy, keys, envelope; max 3 km), IKEA assembly and small handyman jobs. Business staffing is experimental.
 
-- MCP (Streamable HTTP): /mcp with Authorization: Bearer <api key> (demo: ak_demo_milano personal, ak_demo_business company)
+- MCP (Streamable HTTP): /mcp with Authorization: Bearer <api key> (demo: ak_demo_milano)
 - REST: /v1, OpenAPI 3.1 at /openapi.json
 - OpenAI/xAI function schemas: /v1/tools.json
 - Human-readable guide: /docs
 
-Flow: compile_task (structured job, fixed price, open questions) -> create_job -> negotiate | auto_negotiate (A2A on WHEN, never on price) -> accept_quote -> consumer: human confirms via confirm_url; company: auto-approved under policy -> wait_for_update -> get_job (seats, contracts, proof, invoice) -> rate_worker.
+Flow: compile_task (structured job, fixed price, open questions; mode now|scheduled) -> search_supply (who is available, ranked) -> create_job -> negotiate | auto_negotiate (A2A on WHEN, never on price) -> accept_quote -> human confirms via confirm_url -> timed offer to the best partner, cascade on decline/timeout -> wait_for_update -> get_job (proof) -> rate_worker.
 
-Out of scope, other cities, or no available verified partners fail closed with: "Siamo spiacenti ma al momento non abbiamo persone sufficienti a soddisfare la richiesta."
+Out of scope (e.g. lessons/teachers such as Capoeira), other cities, errands beyond 3 km, or no available verified partners fail closed with: "Siamo spiacenti ma al momento non abbiamo persone sufficienti a soddisfare la richiesta." plus a reason (e.g. "fuori ambito v1"). No fake matches.
+
+Simulated in this build: supplier agents (server-side), seed partners, escrow/payments, KYC.

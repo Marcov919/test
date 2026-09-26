@@ -3,7 +3,7 @@
 import { get } from './db.js';
 import { listServices } from './services.js';
 import { compileTask } from './compiler.js';
-import { rankCandidates, publicCandidate } from './matching.js';
+import { rankCandidates, publicCandidate, WEIGHTS, WEIGHT_LABELS_IT } from './matching.js';
 import { createJob, serializeJob, loadJob, listJobsForAccount, rateWorker, summarizeExcluded } from './jobs.js';
 import { negotiateRound, acceptQuote, autoNegotiate } from './negotiation.js';
 import { buyerCancel } from './dispatch.js';
@@ -23,33 +23,35 @@ const window = {
   description: 'When. For flexible services (gardening, furniture…) the partner starts anywhere inside the window; for shifts (event staff, load-in crews) it is the exact shift.',
   properties: { start: { type: 'string', format: 'date-time' }, end: { type: 'string', format: 'date-time' } },
 };
+const mode = { type: 'string', enum: ['now', 'scheduled'], description: 'now = "Adesso": as soon as a partner is free (within 3h, short-notice surcharge). scheduled = "Programma": inside window (default).' };
 
 export const TOOLS = [
   {
     name: 'list_services', method: 'GET', path: '/v1/services',
-    description: 'Catalog of physical services Aronica dispatches in Milano (home: gardening, furniture assembly, handyman, cleaning, waiting at home, errands/purchases; business: load-in crews, event staff, short-let turnover, photo inspections, retail checks). Each has a typed params schema, fixed pricing and a proof type. Anything else fails closed.',
+    description: 'Catalog of physical services Aronica dispatches in Milano for private people: car wash (pick-up & return, or mobile wash), waiting at home for a technician/courier, local pick-up & drop-off (pharmacy, keys, envelope; max 3 km), IKEA assembly, small handyman, cleaning, gardening, purchase errands. Business staffing (load-in crews, event staff, short-let turnover) is experimental. Each service has typed params, a fixed price and a proof type. Anything else fails closed.',
     input: { type: 'object', properties: {} },
   },
   {
     name: 'compile_task', method: 'POST', path: '/v1/tasks/compile',
-    description: 'Turn a vague request ("sistemare il giardino sabato mattina, 80 mq con siepe" / "4 facchini venerdì 7-12 a Rho") into a structured job: service, typed params, time window, headcount, duration, FIXED price with breakdown, proof, plus the questions still open. Nothing is booked. Use it to confirm details with your user before create_job.',
+    description: 'Turn a vague request ("Porta la mia auto all\'autolavaggio sabato mattina e riportamela, Navigli, berlina, interno+esterno" / "aspetta il corriere a casa mia domani 9-13") into a structured job: service, typed params, time window, headcount, duration, FIXED price with breakdown, proof, plus the questions still open. Nothing is booked. Use it to confirm details with your user before create_job.',
     input: {
       type: 'object',
       properties: {
         text: { type: 'string', description: 'The user\'s request in natural language (Italian or English)' },
         service: { type: 'string', description: 'Optional explicit service code' },
         params: { type: 'object', description: 'Optional typed params (see list_services) — override what is parsed from text' },
-        location, window,
+        location, window, mode,
       },
     },
   },
   {
     name: 'search_supply', method: 'GET', path: '/v1/supply',
-    description: 'Check live supply: verified partners who do the service, are free in the window and accept the price. Ranked, privacy-safe.',
+    description: 'Check live supply before booking: verified partners (people or local businesses) who do the service, are free in the window and accept the fixed price. Ranked (proximity, rating, reliability, service fit, acceptance) with how each one does the job. Pass the same text you compiled, or service + address. If nobody is available it says so: no fake matches.',
     input: {
-      type: 'object', required: ['service'],
+      type: 'object',
       properties: {
-        service: { type: 'string' }, address: { type: 'string' }, lat: { type: 'number' }, lng: { type: 'number' },
+        text: { type: 'string', description: 'The request text (same as compile_task)' },
+        service: { type: 'string' }, address: { type: 'string' }, lat: { type: 'number' }, lng: { type: 'number' }, mode,
         start: { type: 'string', format: 'date-time' }, end: { type: 'string', format: 'date-time' },
         limit: { type: 'integer', default: 5 },
       },
@@ -61,7 +63,7 @@ export const TOOLS = [
     input: {
       type: 'object',
       properties: {
-        text: { type: 'string' }, service: { type: 'string' }, params: { type: 'object' }, location, window,
+        text: { type: 'string' }, service: { type: 'string' }, params: { type: 'object' }, location, window, mode,
         instructions: { type: 'array', items: { type: 'string' }, description: 'Extra step-by-step instructions for the partner (access, keys, referente…)' },
         max_price_eur: { type: 'number', description: 'Refuse if the fixed price is above this' },
         agent_name: { type: 'string' },
@@ -119,6 +121,27 @@ function ownJob(account, jobId) {
   return job;
 }
 
+export function searchSupply(args = {}) {
+  if (!args.service && !args.text) throw new HttpError(400, 'service_or_text_required', 'Pass text (as in compile_task) or a service code.');
+  const c = compileTask({
+    text: args.text, service: args.service, params: typeof args.params === 'object' ? args.params : undefined, mode: args.mode,
+    location: args.location ?? (args.address || args.lat != null ? { address: args.address, lat: args.lat, lng: args.lng } : undefined),
+    window: args.window ?? (args.start ? { start: args.start, end: args.end } : undefined),
+  });
+  const probe = {
+    city: 'milano', service: c.service.code, lat: c.location?.lat ?? CITY.center.lat, lng: c.location?.lng ?? CITY.center.lng,
+    window_start: Date.parse(c.window.start), window_end: Date.parse(c.window.end), flexible: c.window.flexible ? 1 : 0,
+    duration_min: c.duration_min, price: c.price,
+  };
+  const { eligible, excluded } = rankCandidates(probe);
+  return {
+    service: c.service.code, title: c.title, window: c.window.label, price_cents: c.price.total_cents, available: eligible.length,
+    ranking: { weights: WEIGHTS, labels_it: WEIGHT_LABELS_IT, filters: 'verified, active, does the service, within 18 km, free in the window, accepts the fixed pay' },
+    partners: eligible.slice(0, Math.min(20, Number(args.limit ?? 5))).map(publicCandidate),
+    excluded: summarizeExcluded(excluded), message: eligible.length ? null : NO_SUPPLY_IT,
+  };
+}
+
 const handlers = {
   list_services() {
     return {
@@ -130,24 +153,12 @@ const handlers = {
       places: GAZETTEER.map((g) => g.name),
       rating_tags: Object.fromEntries(Object.entries(RATING_TAGS).map(([k, v]) => [k, { label_it: v.label_it, not_workers_fault: !!v.excluded }])),
       contracts: { routes: ROUTES, presto_caps_indicative: CAPS },
-      fail_closed: `Out-of-scope requests (lessons, beauty, medical, certified plumbing/electrical…), other cities, or no available verified partners return: ${NO_SUPPLY_IT}`,
+      fail_closed: `Out-of-scope requests (lessons/teachers such as Capoeira, beauty, medical, certified plumbing/electrical…), other cities, errands beyond 3 km, or no available verified partners return: ${NO_SUPPLY_IT} (+ reason, e.g. "fuori ambito v1")`,
+      simulated: 'Supplier agents run server-side; seed partners are simulated in the demo; escrow, payments and KYC are stubs.',
     };
   },
   compile_task(account, args) { return compileTask(args); },
-  search_supply(account, args) {
-    const c = compileTask({ service: args.service, location: { address: args.address, lat: args.lat, lng: args.lng }, window: args.start ? { start: args.start, end: args.end } : undefined });
-    const probe = {
-      city: 'milano', service: c.service.code, lat: c.location?.lat ?? CITY.center.lat, lng: c.location?.lng ?? CITY.center.lng,
-      window_start: Date.parse(c.window.start), window_end: Date.parse(c.window.end), flexible: c.window.flexible ? 1 : 0,
-      duration_min: c.duration_min, price: c.price,
-    };
-    const { eligible, excluded } = rankCandidates(probe);
-    return {
-      service: c.service.code, window: c.window.label, price_cents: c.price.total_cents, available: eligible.length,
-      partners: eligible.slice(0, Math.min(20, Number(args.limit ?? 5))).map(publicCandidate),
-      excluded: summarizeExcluded(excluded), message: eligible.length ? null : NO_SUPPLY_IT,
-    };
-  },
+  search_supply(account, args) { return searchSupply(args); },
   create_job(account, args) { return createJob(account, args); },
   async negotiate(account, args) {
     ownJob(account, args.job_id);

@@ -47,8 +47,9 @@ function acceptLine(service, job, c, seats) {
       ? `Copro ${seats} ${seats === 1 ? 'posto' : 'posti'} su ${job.headcount} con la mia squadra, ${when}.`
       : `Disponibile per il turno ${when}.`;
   }
-  const crew = c.worker.kind === 'business' ? ' con la squadra' : '';
-  return `Ci sono ${when}${crew}. Durata stimata ${durationLabel(job.duration_min)}.`;
+  const crew = c.worker.kind === 'business' && !c.worker.service_notes?.[job.service] ? ' con la squadra' : '';
+  const how = c.worker.service_notes?.[job.service];
+  return `Ci sono ${when}${crew}. ${how ? `${how} ` : ''}Durata stimata ${durationLabel(job.duration_min)}.`;
 }
 
 export function supplierReply(job, service, c) {
@@ -167,7 +168,7 @@ export function acceptQuote(jobId, quoteId, { actor = 'buyer_agent' } = {}) {
     price_cents: price.total_cents,
     repriced: price !== job.price,
     quote_id: q.id,
-    lead: { worker_ref: lead.worker.id, alias: lead.worker.display_name, kind: lead.worker.kind, rating: lead.rating, rating_count: lead.rating_count, score: lead.score, insured: !!lead.worker.insured },
+    lead: { worker_ref: lead.worker.id, alias: lead.worker.display_name, kind: lead.worker.kind, rating: lead.rating, rating_count: lead.rating_count, score: lead.score, insured: !!lead.worker.insured, how: lead.worker.service_notes?.[job.service] ?? null },
     seats_available: seatsInPool,
     headcount: job.headcount,
     pool: ordered.map((c) => c.worker.id),

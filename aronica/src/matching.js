@@ -16,15 +16,17 @@ export const MAX_RADIUS_KM = 18;
 export function maxSeatsPerSupplier(headcount) {
   return headcount >= 4 ? Math.ceil(headcount / 2) : headcount;
 }
-export const WEIGHTS = { distance: 0.25, rating: 0.25, reliability: 0.2, experience: 0.15, timing: 0.1, acceptance: 0.05 };
+// Kept deliberately simple and explainable (shown in Ops and to agents).
+export const WEIGHTS = { proximity: 0.3, rating: 0.25, reliability: 0.2, service_fit: 0.15, acceptance: 0.1 };
+export const WEIGHT_LABELS_IT = { proximity: 'Vicinanza', rating: 'Valutazione', reliability: 'Affidabilità (completamento, no-show)', service_fit: 'Esperienza nel servizio', acceptance: 'Accettazione offerte' };
 const WARNING_PENALTY = 12;
 const STEP = 30 * 60000;
 
 // Crew already committed by this worker in [start, end).
-export function busyLoad(workerId, start, end) {
+export function busyLoad(workerId, start, end, ignoreJobId = null) {
   const rows = all(
     `SELECT a.crew, j.slot_start, j.duration_min FROM assignments a JOIN jobs j ON j.id = a.job_id
-     WHERE a.worker_id = ? AND a.status IN ('assigned','en_route','on_site')`, workerId,
+     WHERE a.worker_id = ? AND a.status IN ('assigned','en_route','on_site') AND j.id != ?`, workerId, ignoreJobId ?? '',
   );
   return rows.filter((r) => r.slot_start < end && r.slot_start + r.duration_min * 60000 > start).reduce((a, r) => a + r.crew, 0);
 }
@@ -40,17 +42,17 @@ function inAvailability(w, start, minutes) {
   return (w.availability?.[p.dow] ?? []).some(([a, b]) => from >= a && to <= b);
 }
 
-export function freeCapacity(w, start, minutes) {
+export function freeCapacity(w, start, minutes, ignoreJobId = null) {
   if (!inAvailability(w, start, minutes)) return 0;
-  return Math.max(0, w.capacity - busyLoad(w.id, start, start + minutes * 60000));
+  return Math.max(0, w.capacity - busyLoad(w.id, start, start + minutes * 60000, ignoreJobId));
 }
 
 // Earliest feasible start in [from, to] (start times on a 30-minute grid).
-export function earliestStart(w, from, to, minutes, earliestPossible) {
+export function earliestStart(w, from, to, minutes, earliestPossible, ignoreJobId = null) {
   const grid = 15 * 60000;
   let t = Math.ceil(Math.max(from, earliestPossible) / grid) * grid;
   for (let i = 0; i < 400 && t <= to; i++, t += STEP) {
-    if (freeCapacity(w, t, minutes) > 0) return t;
+    if (freeCapacity(w, t, minutes, ignoreJobId) > 0) return t;
   }
   return null;
 }
@@ -61,13 +63,11 @@ export function scoreWorker(w, job, start) {
   const r = ratingStats(w.id);
   const m = metrics(w);
   const exp = w.skill_jobs?.[job.service] ?? 0;
-  const windowLen = Math.max(1, job.window_end - job.window_start - job.duration_min * 60000);
   const parts = {
-    distance: 1 - clamp(distance_km / MAX_RADIUS_KM),
+    proximity: 1 - clamp(distance_km / MAX_RADIUS_KM),
     rating: clamp((r.bayes_avg - 4.0) / 1.0),
     reliability: clamp((m.completion - 0.7) / 0.3) * (1 - clamp(w.no_shows / 3)),
-    experience: clamp(Math.log10(1 + exp) / 2),
-    timing: start == null ? 0 : 1 - clamp((start - job.window_start) / windowLen),
+    service_fit: clamp(Math.log10(1 + exp) / 2.5),
     acceptance: m.acceptance,
   };
   let score = 0;
@@ -87,7 +87,9 @@ export function scoreWorker(w, job, start) {
 
 // job needs: service, lat, lng, window_start, window_end, duration_min, price (quote), flexible
 // opts.slotStart: only partners free at exactly that start.
-export function rankCandidates(job, { slotStart = null, excludeIds = [] } = {}) {
+// opts.explain: ignore this job's own assignments (Ops "why this ranking" view).
+export function rankCandidates(job, { slotStart = null, excludeIds = [], explain = false } = {}) {
+  const ignore = explain ? job.id : null;
   const service = getService(job.service);
   if (!service) return { eligible: [], excluded: [], service: null };
   const now = clock.now();
@@ -113,20 +115,21 @@ export function rankCandidates(job, { slotStart = null, excludeIds = [] } = {}) 
     if (!reasons.length) {
       const eta = Math.round(haversineKm(w, job) * 1.3 / 14 * 60) + 10;
       if (slotStart != null) {
-        capacity = freeCapacity(w, slotStart, minutes);
+        capacity = freeCapacity(w, slotStart, minutes, ignore);
         // A replacement may arrive late, but only within the first half of the job.
         const arrive = Math.max(slotStart, now + eta * 60000);
         start = capacity > 0 && arrive <= slotStart + (minutes * 60000) / 2 ? slotStart : null;
       } else {
         const last = job.flexible ? job.window_end - minutes * 60000 : job.window_start;
-        start = earliestStart(w, job.window_start, last, minutes, now + eta * 60000);
-        if (start != null) capacity = freeCapacity(w, start, minutes);
+        start = earliestStart(w, job.window_start, last, minutes, explain ? job.window_start : now + eta * 60000, ignore);
+        if (start != null) capacity = freeCapacity(w, start, minutes, ignore);
       }
       if (start == null) reasons.push('not_available');
     }
     if (reasons.length) { excluded.push({ worker_id: w.id, reasons }); continue; }
     eligible.push({ worker: w, start, capacity_free: capacity, ...scoreWorker(w, job, start) });
   }
+  for (const c of eligible) c.service_code = job.service;
   eligible.sort((a, b) => b.score - a.score || a.start - b.start);
   eligible.forEach((c, i) => { c.rank = i + 1; });
   return { eligible, excluded, service };
@@ -158,5 +161,6 @@ export function publicCandidate(c) {
     rating_count: c.rating_count,
     completion_rate: c.completion,
     jobs_in_service: c.experience_jobs,
+    how: w.service_notes?.[c.service_code] ?? null,
   };
 }

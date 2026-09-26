@@ -20,32 +20,39 @@ function client(key) {
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const SCENARIOS = {
-  week: {
-    label: 'Assistente personale · la mia settimana',
+  carwash: {
+    label: 'Auto all\'autolavaggio',
     who: 'Assistente personale (chiave privato)',
     key: 'ak_demo_milano',
-    prompt: 'Organizzami la settimana. Tra le cose da fare: sistemare il giardino (sono circa 80 mq, c\'è anche la siepe). Sabato mattina va bene, abito ai Navigli.',
-    text: 'sistemare il giardino sabato mattina, circa 80 mq con la siepe, zona Navigli',
+    prompt: 'Sabato ho da fare: porta la mia auto all\'autolavaggio sabato mattina e riportamela. Sono ai Navigli, è una berlina, interno+esterno.',
+    text: 'Porta la mia auto all\'autolavaggio sabato mattina e riportamela — Navigli, berlina, interno+esterno.',
   },
-  fiera: {
-    label: 'Agente acquisti · 4 facchini in Fiera',
-    who: 'Agente di Aurora Eventi (chiave azienda, approvazione automatica fino a €600)',
-    key: 'ak_demo_business',
-    prompt: 'Per l\'allestimento del nostro stand a Fiera Milano Rho servono 4 facchini venerdì dalle 7 alle 12.',
-    text: 'Servono 4 facchini venerdì 7-12 alla Fiera di Rho per allestimento stand',
+  attesa: {
+    label: 'Aspetta il tecnico',
+    who: 'Assistente personale (chiave privato)',
+    key: 'ak_demo_milano',
+    prompt: 'Domani mattina viene il tecnico della lavatrice ma io sono in ufficio. Trovami qualcuno che aspetti a casa mia (Porta Romana) dalle 9 alle 13.',
+    text: 'Aspetta il tecnico della lavatrice a casa mia domani dalle 9 alle 13, Porta Romana',
   },
   capoeira: {
-    label: 'Richiesta fuori ambito',
+    label: 'Capoeira (fuori ambito)',
     who: 'Assistente personale',
     key: 'ak_demo_milano',
     prompt: 'Trovami un insegnante di Capoeira ai Navigli per stasera.',
     text: 'Trovami un insegnante di Capoeira ai Navigli per stasera',
   },
+  fiera: {
+    label: 'Aziende · sperimentale',
+    who: 'Agente di Aurora Eventi (chiave azienda, approvazione automatica fino a €600)',
+    key: 'ak_demo_business',
+    prompt: 'Per l\'allestimento del nostro stand a Fiera Milano Rho servono 4 facchini venerdì dalle 7 alle 12.',
+    text: 'Servono 4 facchini venerdì 7-12 alla Fiera di Rho per allestimento stand',
+  },
 };
 
 export function mountAgent(root, { onOpenConfirm }) {
   let running = false;
-  let scenario = 'week';
+  let scenario = 'carwash';
   const log = h('div.ag-log', { 'aria-live': 'polite' });
   const promptBox = h('div.ag-prompt');
   const runBtn = h('button.btn.primary', { onclick: () => run() }, 'Esegui l\'agente');
@@ -80,8 +87,8 @@ export function mountAgent(root, { onOpenConfirm }) {
       step('call', 'compile_task', code({ text: s.text }));
       const comp = await call('compile_task', { text: s.text });
       if (!comp.ok) {
-        step('err', comp.data.message, h('div.small.muted', {}, comp.data.detail ?? comp.data.error));
-        step('agent', 'Rispondo all\'utente in modo onesto: questo Aronica non lo fa, nessuno viene promesso.');
+        step('err', comp.data.message, h('div', {}, comp.data.reason ? h('span.badge.red', {}, comp.data.reason) : null, h('div.small.muted', { style: { marginTop: '4px' } }, comp.data.detail ?? comp.data.error)));
+        step('agent', 'Rispondo all\'utente in modo onesto: Aronica non lo fa e nessun partner viene contattato o promesso.');
         return;
       }
       const c = comp.data;
@@ -90,8 +97,15 @@ export function mountAgent(root, { onOpenConfirm }) {
       if (c.questions.length) step('agent', `Confermo con l'utente le ipotesi (${c.questions.map((q) => q.key).join(', ')}): ok.`);
       await pause(400);
 
-      step('call', 'create_job', code({ text: s.text }));
-      const created = await call('create_job', { text: s.text, agent_name: s.who.split(' (')[0] });
+      step('call', 'search_supply', code({ text: s.text, limit: 3 }));
+      const sup = await call('search_supply', { text: s.text, limit: 3 });
+      if (!sup.ok || !sup.data.available) { step('err', sup.data.message ?? 'Nessun partner disponibile', h('div.small.muted', {}, 'Nessun match inventato: lo dico all\'utente.')); return; }
+      step('result', `${sup.data.available} partner verificati liberi · classifica: vicinanza, valutazione, affidabilità, esperienza, accettazione`,
+        h('div.ag-quotes', {}, sup.data.partners.map((p) => h('div.ag-q', {}, h('b', {}, `#${p.rank} ${p.alias}`), h('span.badge', {}, `score ${p.score}`), h('span', {}, `★ ${p.rating?.toFixed(2)} · ${p.distance_km} km`), h('span.faint', {}, (p.how ?? '').slice(0, 60))))));
+      await pause(400);
+
+      step('call', 'create_job', code({ text: s.text, agent_name: 'Assistente (script)' }));
+      const created = await call('create_job', { text: s.text, agent_name: s.key === 'ak_demo_business' ? 'Agente acquisti Aurora (script)' : 'Assistente (script)' });
       if (!created.ok) { step('err', created.data.message, h('div.small.muted', {}, created.data.detail ?? '')); return; }
       const job = created.data.job;
       step('result', `Lavoro ${job.id} · ${created.data.supply.available_in_window} partner liberi nella fascia`,
@@ -135,7 +149,8 @@ export function mountAgent(root, { onOpenConfirm }) {
   mount(root,
     h('div.ag-side', {},
       h('h2', {}, 'Agent Connector'),
-      h('p.muted', {}, 'Un agente AI (qui uno script, nessun LLM) usa i tool MCP di Aronica: compila l\'incarico, lo crea, negozia il quando con i supplier agent e ottiene lo slot. Per i privati conferma un umano; per le aziende decide la policy.'),
+      h('div', {}, h('span.badge.warn', {}, 'Agente scriptato · nessun LLM collegato')),
+      h('p.muted', {}, 'Uno script recita la parte del tuo assistente AI e chiama i veri tool MCP di Aronica: compile_task, search_supply, create_job, negotiate, accept_quote. Tu non scrivi nessun campo. Alla fine un umano conferma con un tap.'),
       h('div.field', {}, h('span', {}, 'Scenario'), chips),
       h('div.card.flat.small', {}, promptBox),
       runBtn,

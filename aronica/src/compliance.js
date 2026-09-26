@@ -16,8 +16,8 @@ export const CAPS = {
 };
 
 export const ROUTES = {
-  fattura_b2b: { label_it: 'Fattura del fornitore (P.IVA)', who: 'Il fornitore fattura; Aronica incassa per conto e trattiene la commissione.' },
-  occasionale_privato: { label_it: 'Prestazione occasionale tra privati', who: 'Ricevuta di prestazione occasionale emessa dal partner al cliente privato.' },
+  fattura_b2b: { label_it: 'Partner con P.IVA · fattura al cliente (stub)', who: 'Il partner (attività con P.IVA) fattura al cliente; Aronica fa matching, dispatch e verifica della prova e trattiene la commissione. Aronica non è il datore di lavoro.' },
+  occasionale_privato: { label_it: 'Partner privato · ricevuta occasionale (stub)', who: 'Il partner emette al cliente una ricevuta di prestazione occasionale; Aronica fa matching, dispatch e verifica della prova. Aronica non è il datore di lavoro.' },
   presto: { label_it: 'Contratto PrestO (INPS)', who: 'Contratto di prestazione occasionale PrestO: l\'azienda utilizzatrice versa tramite la piattaforma INPS.' },
   somministrazione: { label_it: 'Somministrazione tramite agenzia partner', who: 'Il partner è assunto per il turno da un\'agenzia per il lavoro autorizzata, che fattura all\'azienda.' },
 };

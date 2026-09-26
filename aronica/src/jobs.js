@@ -58,6 +58,7 @@ export function createJob(account, input) {
     window_start: Date.parse(compiled.window.start),
     window_end: Date.parse(compiled.window.end),
     flexible: compiled.window.flexible ? 1 : 0,
+    mode: compiled.mode ?? 'scheduled',
     duration_min: compiled.duration_min,
     headcount: compiled.headcount,
     price: compiled.price,
@@ -112,6 +113,7 @@ export function publicWorker(w, job = null) {
   if (job) {
     out.distance_km = Math.round(haversineKm(w, job) * 100) / 100;
     out.eta_min = etaMinutes(w, job, w.vehicle);
+    out.how = w.service_notes?.[job.service] ?? null;
   }
   return out;
 }
@@ -153,6 +155,8 @@ export function serializeJob(job, { buyer = false, events = false } = {}) {
     service: job.service,
     service_name: service?.name_it,
     segment: service?.segment,
+    account_kind: get('SELECT kind FROM accounts WHERE id = ?', job.account_id)?.kind ?? 'consumer',
+    mode: job.mode ?? 'scheduled',
     proof_kind: service?.proof?.kind,
     title: job.title,
     request_text: job.request_text,
@@ -160,7 +164,7 @@ export function serializeJob(job, { buyer = false, events = false } = {}) {
     instructions: job.instructions,
     proof_requirements: job.proof_req,
     location: { address: job.address, lat: job.lat, lng: job.lng },
-    window: { start: iso(job.window_start), end: iso(job.window_end), flexible: !!job.flexible, label: job.flexible ? `${slotLabel(job.window_start, Math.round((job.window_end - job.window_start) / 60000))}` : slotLabel(job.window_start, job.duration_min) },
+    window: { start: iso(job.window_start), end: iso(job.window_end), flexible: !!job.flexible, label: job.mode === 'now' ? 'Adesso' : job.flexible ? `${slotLabel(job.window_start, Math.round((job.window_end - job.window_start) / 60000))}` : slotLabel(job.window_start, job.duration_min) },
     slot: slot ? { start: iso(slot), end: iso(slot + job.duration_min * 60000), label: slotLabel(slot, job.duration_min) } : null,
     duration_min: job.duration_min,
     duration_label: durationLabel(job.duration_min),

@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS workers (
   no_shows INTEGER NOT NULL DEFAULT 0,
   earnings_cents INTEGER NOT NULL DEFAULT 0,
   avatar_color TEXT,
+  service_notes TEXT,               -- json {service: how this partner does it}
   simulated INTEGER NOT NULL DEFAULT 0,
   token TEXT UNIQUE,
   joined_at INTEGER NOT NULL
@@ -184,7 +185,7 @@ CREATE INDEX IF NOT EXISTS events_job ON events(job_id, seq);
 
 const JSON_COLS = new Set([
   'skills', 'skill_jobs', 'tier_reasons', 'tags', 'instructions', 'proof_req', 'deal', 'params', 'price', 'approval',
-  'dispatch_pool', 'escrow', 'proof', 'data', 'keywords', 'availability', 'org', 'contract', 'invoice',
+  'dispatch_pool', 'escrow', 'proof', 'data', 'keywords', 'availability', 'org', 'contract', 'invoice', 'service_notes',
 ]);
 
 export let db = null;
@@ -194,6 +195,9 @@ export function openDb(path) {
   db = new DatabaseSync(path);
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
   db.exec(SCHEMA);
+  // additive migrations for databases created by older versions
+  try { db.exec('ALTER TABLE workers ADD COLUMN service_notes TEXT'); } catch { /* already there */ }
+  try { db.exec("ALTER TABLE jobs ADD COLUMN mode TEXT NOT NULL DEFAULT 'scheduled'"); } catch { /* already there */ }
   return db;
 }
 

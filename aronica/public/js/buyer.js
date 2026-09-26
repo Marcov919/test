@@ -1,7 +1,8 @@
-// Buyer console (the human behind the agent). Private person or company:
-// free text → compiled job (typed params, fixed price, open questions) →
-// A2A negotiation on WHEN → one-tap approval (or company policy) → seats
-// filled live with the right contract → proof → done (+ invoice for companies).
+// Buyer console (the human behind the agent). Default: a private person in
+// Milano. Free text → compiled job (typed params, fixed price, open questions)
+// → live supply preview → A2A negotiation on WHEN → one-tap confirm (Adesso or
+// Programma) → timed offer + cascade → proof → rating. Companies are a
+// secondary, experimental tab.
 import {
   h, mount, api, sse, eur, hhmm, toast, icon, avatar,
   createMap, taskPin, workerPin, lightbox, twoStep, setClockOffset, serverNow,
@@ -41,30 +42,31 @@ async function route() {
 // ------------------------------------------------------------------ home
 const EXAMPLES = {
   consumer: [
-    { label: 'Giardino sabato', text: 'Devo sistemare il giardino sabato mattina: circa 80 mq, prato e siepe.', place: 'Navigli' },
-    { label: 'Montaggio IKEA', text: 'Montare 3 librerie IKEA Billy giovedì dalle 17 alle 21', place: 'Isola' },
-    { label: 'Aspettare il tecnico', text: 'Qualcuno che aspetti il tecnico della caldaia a casa mia domani 9-13', place: 'Porta Romana' },
-    { label: 'Jeans per stasera', text: 'Comprarmi un jeans Levi\'s 501 taglia 32 da Levi\'s in Corso Vittorio Emanuele entro le 19, max 120 euro', place: 'Corso Vittorio Emanuele' },
-    { label: 'Pulizia post-festa', text: 'Pulizia dopo la festa domenica mattina, casa di 90 mq', place: 'Porta Venezia' },
-    { label: 'Capoeira (fallisce)', text: 'Trovami un insegnante di Capoeira ai Navigli per stasera', place: 'Navigli' },
+    { label: 'Auto all\'autolavaggio', text: 'Porta la mia auto all\'autolavaggio sabato mattina e riportamela — Navigli, berlina, interno+esterno.', place: 'Navigli' },
+    { label: 'Aspetta il tecnico', text: 'Aspetta il tecnico della lavatrice a casa mia domani dalle 9 alle 13', place: 'Porta Romana' },
+    { label: 'Ricevi il corriere', text: 'Ricevi il corriere a casa mia domani dalle 14 alle 18, arriva un pacco grande', place: 'Isola' },
+    { label: 'Ritiro in farmacia', text: 'Ritira un farmaco alla Farmacia di Porta Ticinese e portamelo a casa entro le 19', place: 'Navigli' },
+    { label: 'Montaggio IKEA', text: 'Montare 2 librerie IKEA Billy giovedì dalle 17 alle 21', place: 'Isola' },
+    { label: 'Insegnante di Capoeira (fallisce)', text: 'Trovami un insegnante di Capoeira ai Navigli per stasera', place: 'Navigli' },
   ],
   business: [
     { label: '4 facchini in fiera', text: 'Servono 4 facchini venerdì 7-12 alla Fiera di Rho per allestimento stand', place: 'Fiera Milano Rho' },
     { label: '2 hostess al MiCo', text: '2 hostess con inglese sabato 9-18 al MiCo per un congresso', place: 'MiCo Milano Congressi' },
     { label: 'Turnover affitto breve', text: 'Turnover appartamento 60 mq in Brera domenica 11-15 con cambio biancheria e check-in ospiti', place: 'Brera' },
-    { label: 'Sopralluogo sinistro', text: 'Sopralluogo con foto per un sinistro (danni da acqua) in un appartamento a NoLo giovedì', place: 'NoLo' },
   ],
 };
 
-function honest(message, detail) {
-  return h('div.empty', {}, h('div.ico', {}, icon('info')), h('div', {}, h('b', {}, message), detail ? h('div.small.muted', { style: { marginTop: '4px' } }, detail) : null));
+function honest(message, detail, reason) {
+  return h('div.empty', {}, h('div.ico', {}, icon('info')), h('div', {}, h('b', {}, message),
+    reason ? h('div', { style: { marginTop: '6px' } }, h('span.badge.red', {}, reason)) : null,
+    detail ? h('div.small.muted', { style: { marginTop: '4px' } }, detail) : null));
 }
 
 async function renderHome() {
   map.clear();
-  const f = { text: '', place: '', custom: null, compiled: null, overrides: {}, window: null };
+  const f = { text: '', place: '', custom: null, compiled: null, overrides: {}, window: null, mode: null, supply: null };
   const result = h('div');
-  const text = h('textarea.input', { id: 'b-text', rows: 3, placeholder: accountKind === 'business' ? 'Es. Servono 4 facchini venerdì 7-12 alla Fiera di Rho' : 'Es. Devo sistemare il giardino sabato mattina, circa 80 mq con la siepe', oninput: (e) => { f.text = e.target.value; } });
+  const text = h('textarea.input', { id: 'b-text', rows: 3, placeholder: accountKind === 'business' ? 'Es. Servono 4 facchini venerdì 7-12 alla Fiera di Rho' : 'Es. Porta la mia auto all\'autolavaggio sabato mattina e riportamela, berlina, interno+esterno', oninput: (e) => { f.text = e.target.value; } });
   const placeSel = h('select.input', { id: 'b-place', onchange: (e) => { f.place = e.target.value; f.custom = null; pin(); } },
     h('option', { value: '' }, 'Zona: dal testo'), cfg.places.map((p) => h('option', { value: p.name }, p.name)));
   const pin = () => {
@@ -81,13 +83,21 @@ async function renderHome() {
 
   async function compile() {
     try {
-      const c = await api('/api/console/compile', { method: 'POST', body: { text: f.text, service: f.compiled?.service.code, params: f.overrides, location: locationInput(), window: f.window ?? undefined } });
+      const body = { text: f.text, service: f.compiled?.service.code, params: f.overrides, location: locationInput(), window: f.mode === 'now' ? undefined : f.window ?? undefined, mode: f.mode ?? undefined };
+      const c = await api('/api/console/compile', { method: 'POST', body });
       f.compiled = c;
+      f.mode = c.mode;
+      f.supply = null;
       mount(result, compiledCard(c));
       pin();
+      if (c.ready) {
+        api('/api/console/supply', { method: 'POST', body: { ...body, service: c.service.code, params: c.params, location: c.location, limit: 3 } })
+          .then((s) => { if (f.compiled === c) { f.supply = s; mount(result, compiledCard(c)); } })
+          .catch(() => {});
+      }
     } catch (e) {
       f.compiled = null;
-      mount(result, honest(e.message, e.data?.detail));
+      mount(result, honest(e.message, e.data?.detail, e.data?.reason));
     }
   }
 
@@ -121,7 +131,35 @@ async function renderHome() {
       compile();
     };
     for (const el of [d, t1, t2]) el.addEventListener('change', apply);
-    return h('div.field', {}, h('span', {}, c.service.code && c.window.flexible ? 'Quando (il partner inizia nella fascia)' : 'Quando'), h('div.row', {}, d, t1, t2));
+    return h('div.field', {}, h('span', {}, c.service.code && c.window.flexible ? 'Fascia (il partner inizia quando è libero)' : 'Orario'), h('div.row', { style: { flexWrap: 'wrap' } }, d, t1, t2));
+  }
+
+  // Uber-style: Adesso (ASAP, within 3h) or Programma (a window).
+  function whenPicker(c) {
+    const set = (m) => { if (m !== c.mode) { f.mode = m; if (m === 'scheduled') f.window = null; compile(); } };
+    return h('div.col', { style: { gap: '8px' } },
+      h('div.seg', { style: { alignSelf: 'flex-start' } },
+        h('button', { class: c.mode === 'now' ? 'on' : '', onclick: () => set('now') }, icon('bolt'), ' Adesso'),
+        h('button', { class: c.mode !== 'now' ? 'on' : '', onclick: () => set('scheduled') }, icon('calendar'), ' Programma')),
+      c.mode === 'now'
+        ? h('div.small.muted', {}, c.window.label, ' · supplemento preavviso breve incluso nel prezzo')
+        : windowEditor(c));
+  }
+
+  function supplyPreview(c) {
+    const s = f.supply;
+    if (!c.ready) return null;
+    if (!s) return h('div.small.muted', {}, h('div.searchbar', { style: { marginBottom: '6px' } }), 'Controllo chi è disponibile…');
+    if (!s.available) return honest(cfg.no_supply_message, 'Nessun partner verificato libero in questa fascia: non inventiamo un match. Prova un altro orario.');
+    return h('div', {},
+      h('div.row.between', { style: { marginBottom: '6px' } }, h('b.small', {}, `${s.available} ${s.available === 1 ? 'partner disponibile' : 'partner disponibili'}`), h('span.xs.faint', {}, 'search_supply · classifica live')),
+      h('div.col', { style: { gap: '6px' } }, s.partners.map((p) => h('div.b-offerrow', { style: { alignItems: 'flex-start' } },
+        avatar(p.alias, '#000', p.kind === 'business' ? 'sq' : ''),
+        h('div.grow', {},
+          h('div.row', { style: { gap: '6px' } }, h('b', {}, p.alias), p.kind === 'business' ? h('span.badge', {}, 'Attività') : null),
+          h('div.xs.faint', {}, `★ ${p.rating?.toFixed(2) ?? '—'} · ${p.distance_km} km · ${p.jobs_in_service} lavori così`),
+          p.how ? h('div.xs', { style: { marginTop: '2px' } }, p.how) : null),
+        h('span.badge', {}, `#${p.rank}`)))));
   }
 
   function compiledCard(c) {
@@ -133,11 +171,12 @@ async function renderHome() {
       h('div.row.between', {}, h('div.row', { style: { gap: '6px' } }, h('span.badge.dark', {}, c.service.name), h('span.badge', {}, c.service.segment === 'business' ? 'Azienda' : 'Casa')), h('span.xs.faint', {}, 'Incarico compilato')),
       h('h3', {}, c.title),
       h('div.small.muted.row', {}, icon('pin'), c.location?.address ?? 'Indirizzo mancante'),
-      windowEditor(c),
+      accountKind === 'business' ? windowEditor(c) : whenPicker(c),
       h('div.grid2', {}, svc.params.filter((x) => x.type !== 'bool').map((x) => field(x, c))),
       svc.params.some((x) => x.type === 'bool') ? h('div.chips', {}, svc.params.filter((x) => x.type === 'bool').map((x) => field(x, c))) : null,
       soft.length ? h('div.small', { style: { background: 'var(--bg-2)', padding: '10px 12px', borderRadius: '10px' } }, h('b', {}, 'Da confermare: '), soft.map((q) => q.q).join(' · ')) : null,
       blocking.length ? honest('Mancano informazioni', blocking.map((q) => q.q).join(' · ')) : null,
+      accountKind === 'business' ? null : supplyPreview(c),
       h('div.sep'),
       h('dl.kv', {},
         ...p.lines.flatMap((l) => [h('dt', {}, l.label), h('dd.num', {}, eur(l.cents))]),
@@ -145,13 +184,13 @@ async function renderHome() {
         h('dt', {}, h('b', {}, 'Prezzo fisso')), h('dd.num', {}, h('b', { style: { fontSize: '20px' } }, eur(p.total_cents))),
         p.hold_cents ? h('dt', {}, 'Spesa pre-autorizzata (rimborsata a scontrino)') : null, p.hold_cents ? h('dd.num', {}, `fino a ${eur(p.hold_cents)}`) : null,
         h('dt', {}, 'Durata'), h('dd', {}, c.duration_label + (c.headcount > 1 ? ` · ${c.headcount} persone` : '')),
-        h('dt', {}, 'Prova'), h('dd', {}, c.proof.kind === 'timesheet' ? 'Check-in e check-out con GPS' : `${c.proof.photos_min} foto + checklist`)),
+        h('dt', {}, 'Prova'), h('dd', {}, c.proof.kind === 'timesheet' ? 'Check-in e check-out con GPS' : c.proof.shots?.length ? `Foto: ${c.proof.shots.join(', ')} · GPS` : `${c.proof.photos_min} foto + checklist`)),
       h('div.xs.faint', {}, 'Nessuna trattativa sul prezzo: gli agenti negoziano solo il quando.'),
       accountKind === 'business'
         ? h('div.small', { style: { background: '#eaf1fe', color: '#1a4fb8', padding: '10px 12px', borderRadius: '10px' } },
           icon('shield'), ` Contratto scelto per ogni persona: PrestO, fattura del fornitore o agenzia partner. ${p.total_cents <= (cfg.accounts.business.org?.auto_approve_max_cents ?? 0) ? `Sotto ${eur(cfg.accounts.business.org.auto_approve_max_cents)}: approvato automaticamente dalla policy aziendale.` : `Sopra ${eur(cfg.accounts.business.org?.auto_approve_max_cents ?? 0)}: serve la tua approvazione.`}`)
         : null,
-      h('button.btn.primary.lg.block', { disabled: !!blocking.length, onclick: (e) => book(e.currentTarget) }, 'Trova disponibilità'));
+      h('button.btn.primary.lg.block', { disabled: !!blocking.length || (f.supply && !f.supply.available && accountKind !== 'business'), onclick: (e) => book(e.currentTarget) }, accountKind === 'business' ? 'Trova disponibilità' : 'Blocca uno slot con i partner'));
   }
 
   async function book(btn) {
@@ -160,19 +199,19 @@ async function renderHome() {
     try {
       const r = await api('/api/console/jobs', {
         method: 'POST',
-        body: { account: accountKind, text: f.text, service: c.service.code, params: { ...c.params }, location: c.location, window: { start: c.window.start, end: c.window.end } },
+        body: { account: accountKind, text: f.text, service: c.service.code, params: { ...c.params }, location: c.location, window: { start: c.window.start, end: c.window.end }, mode: c.mode },
       });
       remember(r.job.id, r.token, r.job.title);
       api(`/api/jobs/${r.job.id}/auto-negotiate?t=${encodeURIComponent(r.token)}`, { method: 'POST', body: {} }).catch(() => {});
       go(`#/job/${r.job.id}?t=${r.token}`);
     } catch (e) {
       btn.disabled = false;
-      mount(result, honest(e.message, e.data?.detail ?? e.data?.questions?.map((q) => q.q).join(' · ')));
+      mount(result, honest(e.message, e.data?.detail ?? e.data?.questions?.map((q) => q.q).join(' · '), e.data?.reason));
     }
   }
 
   const fill = (ex) => {
-    f.text = text.value = ex.text; f.place = placeSel.value = ex.place; f.custom = null; f.compiled = null; f.overrides = {}; f.window = null;
+    f.text = text.value = ex.text; f.place = placeSel.value = ex.place; f.custom = null; f.compiled = null; f.overrides = {}; f.window = null; f.mode = null;
     mount(result); compile();
   };
 
@@ -181,15 +220,15 @@ async function renderHome() {
   mount(panel,
     h('div.seg', {},
       h('button', { class: !biz ? 'on' : '', onclick: () => { accountKind = 'consumer'; renderHome(); } }, icon('user'), ' Privato'),
-      h('button', { class: biz ? 'on' : '', onclick: () => { accountKind = 'business'; renderHome(); } }, icon('briefcase'), ` ${cfg.accounts.business.label ?? 'Azienda'}`)),
+      h('button', { class: biz ? 'on' : '', onclick: () => { accountKind = 'business'; renderHome(); } }, icon('briefcase'), ' Aziende · sperimentale')),
     h('div', {},
-      h('div.b-hero', {}, biz ? 'Chi ti serve, dove e quando?' : 'Cosa ti serve, a Milano?'),
+      h('div.b-hero', {}, biz ? 'Aziende (sperimentale)' : 'Cosa ti serve, a Milano?'),
       h('p.muted.small', {}, biz
-        ? 'Personale one-shot per eventi, fiere, affitti brevi e sopralluoghi. Posti coperti in parallelo, contratto giusto per ogni persona, fattura a fine lavoro.'
-        : 'Scrivilo come lo diresti al tuo assistente. Lo trasformiamo in un incarico preciso, con prezzo fisso e persone verificate.')),
+        ? `Test secondario: personale one-shot per un'azienda demo (${cfg.accounts.business.label ?? 'Aurora Eventi'}), approvazione automatica fino a €600. Non è il percorso principale.`
+        : 'Scrivilo come al tuo assistente. Incarico preciso, prezzo fisso, persone o attività verificate.')),
     h('div.b-examples', {}, h('div.xs.faint', { style: { marginBottom: '6px' } }, 'ESEMPI'), h('div.chips', {}, EXAMPLES[accountKind].map((ex) => h('button.chip', { onclick: () => fill(ex) }, ex.label)))),
     text,
-    h('div.row', {}, placeSel, h('button.btn.primary', { style: { whiteSpace: 'nowrap' }, onclick: () => { f.compiled = null; f.overrides = {}; f.window = null; compile(); } }, 'Prepara l\'incarico')),
+    h('div.row', {}, placeSel, h('button.btn.primary', { style: { whiteSpace: 'nowrap' }, onclick: () => { f.compiled = null; f.overrides = {}; f.window = null; f.mode = null; compile(); } }, 'Prepara l\'incarico')),
     h('div.xs.faint', {}, 'Puoi anche cliccare sulla mappa per il punto esatto.'),
     result,
     mine.length ? h('div', {}, h('h3', { style: { margin: '12px 0 6px' } }, 'Le tue richieste'),
@@ -330,10 +369,10 @@ function viewConfirm(j) {
       confirmBtn.disabled = true;
       try { await api(`/api/jobs/${j.id}/confirm?t=${encodeURIComponent(state.token)}`, { method: 'POST', body: {} }); refetch(); } catch (e) { toast(e.message, true); confirmBtn.disabled = false; }
     },
-  }, `Conferma · ${eur(j.price.total_cents)}`);
+  }, `${j.mode === 'now' ? 'Conferma adesso' : 'Conferma e programma'} · ${eur(j.price.total_cents)}`);
   return h('div.col', { style: { gap: '14px' } },
     h('div.card', { style: { boxShadow: 'var(--shadow)' } },
-      h('div.row.between', {}, h('h3', {}, 'Slot bloccato'), h('span.xs.faint', {}, `${d.rounds} round A2A`)),
+      h('div.row.between', {}, h('div.row', { style: { gap: '6px' } }, h('h3', {}, 'Slot bloccato'), h('span', { class: `badge ${j.mode === 'now' ? 'warn' : 'blue'}` }, j.mode === 'now' ? 'Adesso' : 'Programmato')), h('span.xs.faint', {}, `${d.rounds} round A2A`)),
       h('div.b-hero', { style: { margin: '10px 0 4px' } }, d.slot_label),
       j.headcount > 1 ? h('div.small.muted', {}, `Disponibilità confermata per ${d.seats_available} posti su ${j.headcount}`) : null,
       h('div.row', { style: { margin: '14px 0', alignItems: 'flex-start' } },
@@ -341,7 +380,8 @@ function viewConfirm(j) {
         h('div.grow', {},
           h('b', {}, lead.alias),
           h('div.row.wrap', { style: { gap: '6px', margin: '4px 0' } }, h('span.badge.green', {}, icon('shield'), 'Verificato'), lead.insured ? h('span.badge', {}, 'RC assicurata') : null),
-          h('div.small.muted', {}, `★ ${lead.rating?.toFixed(2) ?? '—'} (${lead.rating_count}) · match ${lead.score}${j.headcount > 1 ? ' · primo della coda' : ''}`))),
+          h('div.small.muted', {}, `★ ${lead.rating?.toFixed(2) ?? '—'} (${lead.rating_count}) · match ${lead.score}${j.headcount > 1 ? ' · primo della coda' : ''}`),
+          lead.how ? h('div.small', { style: { marginTop: '4px' } }, lead.how) : null)),
       h('div.row.between', {}, h('span.small.muted', {}, 'Prezzo fisso'), h('div.b-price.num', {}, eur(j.price.total_cents))),
       d.repriced ? h('div.xs', { style: { color: 'var(--warn-ink)' } }, 'Prezzo ricalcolato per il nuovo orario.') : null,
       h('div.sep'),
@@ -352,7 +392,8 @@ function viewConfirm(j) {
         h('dt', {}, 'Commissione Aronica'), h('dd.num', {}, eur(j.price.fee_cents)),
         j.price.hold_cents ? h('dt', {}, 'Spesa pre-autorizzata') : null, j.price.hold_cents ? h('dd.num', {}, `fino a ${eur(j.price.hold_cents)}`) : null,
         h('dt', {}, 'Pagamento'), h('dd', {}, 'Escrow (stub, nessun addebito reale)'))),
-    h('div.xs.faint', {}, `Se ${lead.alias} non risponde entro pochi secondi, l'offerta passa al prossimo partner libero in quello slot. Se qualcuno non si presenta, lo sostituiamo in automatico.`),
+    h('div.xs.faint', {}, `Se ${lead.alias} rifiuta o non risponde entro pochi secondi, l'offerta passa al prossimo partner libero in quello slot. Se non c'è nessuno te lo diciamo, senza inventare un match.`),
+    j.account_kind !== 'business' ? h('div.xs.faint', {}, 'Aronica fa matching, dispatch e verifica della prova. Il servizio lo rende il partner (attività con P.IVA o privato verificato): non siamo il datore di lavoro.') : null,
     confirmBtn,
     h('div.row.between.small.muted', {}, h('span', {}, 'Annullamento gratuito fino a 24 ore prima'), h('button.linkbtn', { onclick: cancelJob }, 'Annulla')));
 }
@@ -377,8 +418,8 @@ function viewStaffing(j) {
   const single = j.headcount === 1 && live[0];
   const headline = single
     ? { assigned: `${single.worker.alias} è confermato/a`, en_route: `${single.worker.alias} è in viaggio`, on_site: `${single.worker.alias} è sul posto`, done: 'Lavoro consegnato' }[single.status] ?? j.status_label
-    : j.status === 'dispatching' ? (j.headcount === 1 ? 'Offerta inviata al partner migliore…' : `Coperti ${j.seats_filled} ${j.seats_filled === 1 ? 'posto' : 'posti'} su ${j.headcount}`) : j.status_label;
-  const events = (j.events ?? []).filter((e) => ['assignment.no_show', 'dispatch.replacement', 'job.worker_cancelled', 'job.partially_filled'].includes(e.type));
+    : j.status === 'dispatching' ? (j.headcount === 1 ? (j.dispatch?.tried > 1 ? 'Offerta passata al partner successivo…' : 'Offerta inviata al partner migliore…') : `Coperti ${j.seats_filled} ${j.seats_filled === 1 ? 'posto' : 'posti'} su ${j.headcount}`) : j.status_label;
+  const events = (j.events ?? []).filter((e) => ['dispatch.offer_declined', 'dispatch.offer_expired', 'assignment.no_show', 'dispatch.replacement', 'job.worker_cancelled', 'job.partially_filled'].includes(e.type));
   return h('div.col', { style: { gap: '14px' } },
     h('div.b-hero', {}, headline),
     j.status === 'dispatching' ? h('div.searchbar') : null,
@@ -398,7 +439,10 @@ function viewStaffing(j) {
 }
 
 function eventText(e, j) {
-  const name = j.assignments.find((a) => a.worker.worker_ref === e.worker_id)?.worker.alias ?? 'Un partner';
+  const name = j.assignments.find((a) => a.worker.worker_ref === e.worker_id)?.worker.alias
+    ?? (j.events ?? []).find((x) => x.type === 'dispatch.offer_sent' && x.worker_id === e.worker_id)?.data.alias ?? 'Un partner';
+  if (e.type === 'dispatch.offer_declined') return `${name} ha rifiutato: offerta al partner successivo.`;
+  if (e.type === 'dispatch.offer_expired') return `${name} non ha risposto in tempo: offerta al partner successivo.`;
   if (e.type === 'assignment.no_show') return `${name} non si è presentato/a: sostituzione automatica avviata.`;
   if (e.type === 'dispatch.replacement') return `Offerta di sostituzione inviata per ${e.data.seats} posto/i.`;
   if (e.type === 'job.worker_cancelled') return `${name} ha annullato: cerco un sostituto.`;
@@ -419,7 +463,8 @@ function assignmentRow(a, j) {
     h('div', { style: { textAlign: 'right' } },
       h('span', { class: `badge ${st}` }, a.status_label),
       a.contract ? h('div.xs.faint', { style: { marginTop: '4px' } }, a.contract.label) : null),
-    a.contract ? h('details', { style: { width: '100%' } }, h('summary.xs.faint', {}, 'Contratto e controlli'),
+    a.worker.how && j.account_kind !== 'business' ? h('div.xs', { style: { width: '100%', marginLeft: '46px' } }, a.worker.how) : null,
+    a.contract && j.account_kind === 'business' ? h('details', { style: { width: '100%' } }, h('summary.xs.faint', {}, 'Contratto e controlli'),
       h('pre.xs', { style: { whiteSpace: 'pre-wrap', background: 'var(--bg-2)', padding: '8px', borderRadius: '8px', fontFamily: 'inherit' } }, a.contract.text),
       a.contract.checks?.length ? h('div.col', { style: { gap: '2px' } }, a.contract.checks.map((c) => h('div.xs', { style: { color: c.ok ? 'var(--accent-ink)' : 'var(--danger)' } }, `${c.ok ? '✓' : '✗'} ${c.rule} — ${c.value}`)), a.contract.indicative ? h('div.xs.faint', {}, 'Limiti indicativi, da validare con un consulente del lavoro.') : null) : null) : null);
 }
@@ -436,7 +481,9 @@ function viewDone(j) {
     done.map((a) => h('div.card', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
       h('div.row', {}, avatar(a.worker.alias, a.worker.avatar_color, a.worker.kind === 'business' ? 'sq' : ''), h('div.grow', {}, h('b', {}, a.worker.alias), h('div.xs.faint', {}, a.contract?.label)), h('b.num', {}, eur(a.payout_cents))),
       a.proof?.simulated ? h('div.xs.faint', {}, 'Prova prodotta dal simulatore demo (partner seed).') : null,
-      a.proof?.photos?.length ? h('div.photos', {}, a.proof.photos.map((src) => h('img', { src, alt: 'Foto prova', onclick: () => lightbox(src), style: { cursor: 'zoom-in' } }))) : null,
+      a.proof?.photos?.length ? h('div.photos', {}, a.proof.photos.map((src, i) => h('div', { style: { position: 'relative' } },
+        h('img', { src, alt: j.proof_requirements.shots?.[i] ?? 'Foto prova', onclick: () => lightbox(src), style: { cursor: 'zoom-in' } }),
+        j.proof_requirements.shots?.[i] ? h('span.xs', { style: { position: 'absolute', left: '4px', bottom: '4px', background: 'rgba(0,0,0,.65)', color: '#fff', padding: '1px 6px', borderRadius: '6px', pointerEvents: 'none' } }, j.proof_requirements.shots[i]) : null))) : null,
       a.proof?.timesheet ? h('div.small', {}, `Check-in ${hhmm(a.proof.timesheet.check_in)} · check-out ${hhmm(a.proof.timesheet.check_out)} · ${Math.round(a.proof.timesheet.minutes_worked / 6) / 10} h lavorate`) : null,
       h('div.req', {}, h('span.badge.green', {}, icon('pin'), `GPS a ${a.proof.gps.distance_m} m (max ${a.proof.gps.radius_m})${a.proof.gps.simulated_position ? ' · simulato' : ''}`)),
       Object.keys(a.proof.answers ?? {}).length ? h('dl.kv', {}, Object.entries(a.proof.answers).flatMap(([k, v]) => [h('dt', {}, q[k] ?? k), h('dd', {}, fmt(v))])) : null,

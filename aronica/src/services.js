@@ -1,6 +1,7 @@
-// Aronica service catalog (v2). Two segments:
-//   casa     — what a personal assistant generates while planning someone's week
-//   business — one-shot hiring by companies (events, short-term rentals, inspections)
+// Aronica service catalog (v1.1). Two segments:
+//   casa     — "mi sblocca la giornata": what a personal assistant hands off when
+//              software can't finish (car wash, waiting at home, errands, IKEA)
+//   business — one-shot staffing for companies (experimental, secondary tab)
 // Each service is a *structured* job: typed parameters, a price formula (fixed,
 // no haggling), a duration formula, and a proof type. Anything not in the table
 // fails closed.
@@ -15,6 +16,40 @@ const note = (id, q, required = false) => ({ id, q, type: 'text', required });
 
 export const SERVICE_SEED = [
   // ------------------------------------------------------------------ casa
+  {
+    code: 'lavaggio_auto', segment: 'casa', name_it: 'Lavaggio auto', name_en: 'Car wash',
+    description: 'Ritiro e riconsegna dell\'auto con lavaggio in autolavaggio, oppure lavaggio sotto casa con carrello mobile. Foto della targa, prima e dopo.',
+    params: [
+      oneOf('veicolo', 'Veicolo', [{ v: 'utilitaria', label: 'Utilitaria / city car' }, { v: 'berlina', label: 'Berlina / station wagon' }, { v: 'suv', label: 'SUV / monovolume' }], 'berlina'),
+      oneOf('tipo', 'Lavaggio', [{ v: 'esterno', label: 'Solo esterno' }, { v: 'interno_esterno', label: 'Interno + esterno' }, { v: 'completo', label: 'Completo + igienizzazione' }], 'interno_esterno'),
+      bool('ritiro', 'Ritiro e riconsegna dell\'auto', true),
+    ],
+    proof: {
+      kind: 'photos', photos_min: 4, gps_radius_m: 200,
+      shots: ['Targa', 'Auto prima', 'Auto dopo', 'Interni / riconsegna'],
+      checklist: [yesNo('plate_ok', 'Targa corrispondente alla richiesta?'), yesNo('returned', 'Auto e chiavi riconsegnate come concordato?'), note('damages', 'Graffi o danni già presenti (se nessuno, scrivi "nessuno")', true)],
+    },
+    instructions: ['Foto della targa e dell\'auto PRIMA, sui 4 lati', 'Ritiro delle chiavi come concordato con il cliente', 'Lavaggio (in autolavaggio o con carrello mobile)', 'Foto DOPO dalle stesse angolazioni + interni', 'Riconsegna auto e chiavi nel punto concordato'],
+    keywords: ['autolavaggio', 'lavaggio auto', 'lavaggio della macchina', 'lavare la macchina', 'lavare l auto', 'lavare la mia auto', 'lavare la mia macchina', 'macchina a lavare', 'auto a lavare', 'car wash', 'lavaggio', 'berlina', 'utilitaria', 'suv', 'interni auto', 'wash my car'],
+    flexible: true,
+  },
+  {
+    code: 'ritiro_consegna', segment: 'casa', name_it: 'Ritiro e consegna in zona', name_en: 'Local pick-up & drop-off',
+    description: 'Ritira e consegna qualcosa di piccolo in zona: farmaco già pagato o prenotato, chiavi, busta, documenti. Raggio massimo 3 km.',
+    params: [
+      oneOf('cosa', 'Cosa', [{ v: 'farmaco', label: 'Farmaco (prenotato / pagato)' }, { v: 'chiavi', label: 'Chiavi' }, { v: 'documenti', label: 'Busta / documenti' }, { v: 'pacco', label: 'Pacco piccolo' }], 'pacco'),
+      text('ritiro_presso', 'Dove ritirare', { ask: 'Dove va ritirato (negozio, farmacia, indirizzo)?', required: true }),
+    ],
+    proof: {
+      kind: 'photos', photos_min: 2, gps_radius_m: 150,
+      shots: ['Al ritiro', 'Alla consegna'],
+      checklist: [yesNo('delivered', 'Consegnato alla persona o nel punto indicato?'), note('recipient', 'Chi ha ricevuto', true)],
+    },
+    instructions: ['Foto al ritiro (oggetto e insegna)', 'Consegna diretta, senza soste', 'Foto alla consegna'],
+    keywords: ['ritirare', 'ritirami', 'ritira ', 'farmacia', 'farmaco', 'medicin', 'ricetta', 'chiavi', 'busta', 'documenti', 'recapitare', 'portami', 'portare le chiavi', 'consegnare'],
+    flexible: true,
+    radius_km: 3,
+  },
   {
     code: 'giardinaggio', segment: 'casa', name_it: 'Giardinaggio', name_en: 'Gardening',
     description: 'Taglio prato, siepi, foglie e smaltimento del verde. Squadre con attrezzatura propria.',
@@ -70,9 +105,9 @@ export const SERVICE_SEED = [
     code: 'attesa_in_casa', segment: 'casa', name_it: 'Attesa al posto tuo', name_en: 'Wait at home',
     description: 'Qualcuno aspetta a casa tua il tecnico, il corriere o il letturista, e ti manda foto e conferma.',
     params: [num('ore', 'Durata della finestra di attesa', { unit: 'ore', default: 3, min: 1, max: 10, ask: 'Quante ore dura la finestra di attesa?' })],
-    proof: { kind: 'photos', photos_min: 1, gps_radius_m: 100, checklist: [yesNo('arrived', 'Il tecnico/corriere è arrivato?'), note('notes', 'Esito (cosa è stato fatto, consegnato)', true)] },
+    proof: { kind: 'photos', photos_min: 1, gps_radius_m: 100, shots: ['Consegna / intervento concluso'], checklist: [yesNo('arrived', 'Il tecnico/corriere è arrivato?'), note('notes', 'Esito (cosa è stato fatto, consegnato)', true)] },
     instructions: ['Ritira le chiavi come concordato', 'Resta in casa per tutta la finestra', 'Foto della consegna / dell\'intervento concluso'],
-    keywords: ['aspettare', 'attendere', 'aspetti', 'attenda', 'il tecnico', 'corriere', 'letturista', 'consegna a casa', 'ricevere il pacco', 'wait for', 'be home', 'essere a casa'],
+    keywords: ['aspettare', 'attendere', 'aspetta', 'aspetti', 'attenda', 'il tecnico', 'corriere', 'ricevi il', 'ricevere il', 'letturista', 'consegna a casa', 'ricevere il pacco', 'wait for', 'be home', 'essere a casa'],
     flexible: false,
     mentions_ok: true,
   },
@@ -86,7 +121,7 @@ export const SERVICE_SEED = [
     ],
     proof: { kind: 'photos', photos_min: 2, gps_radius_m: 150, checklist: [yesNo('bought', 'Articolo acquistato come richiesto?'), { id: 'spesa_eur', q: 'Importo dello scontrino (€)', type: 'number', required: true }] },
     instructions: ['Foto dell\'articolo in negozio prima di pagare (taglia/modello)', 'Paga entro il tetto di spesa', 'Foto dello scontrino', 'Consegna all\'indirizzo del cliente'],
-    keywords: ['comprare', 'comprarmi', 'comprami', 'acquistare', 'compra ', 'prendere al negozio', 'ritirare in negozio', 'ritirare un', 'buy', 'pick up', 'commissione', 'jeans', 'regalo'],
+    keywords: ['comprare', 'comprarmi', 'comprami', 'acquistare', 'compra ', 'prendere al negozio', 'buy', 'commissione', 'jeans', 'regalo'],
     flexible: true,
     mentions_ok: true,
   },
@@ -129,28 +164,20 @@ export const SERVICE_SEED = [
     keywords: ['airbnb', 'affitto breve', 'affitti brevi', 'turnover', 'cambio biancheria', 'check-in', 'check in', 'ospiti in arrivo', 'booking', 'short let', 'host'],
     flexible: true,
   },
-  {
-    code: 'sopralluogo_foto', segment: 'business', name_it: 'Sopralluogo fotografico', name_en: 'Photo inspection',
-    description: 'Verifica di un immobile o di un sinistro con foto geolocalizzate e report strutturato.',
-    params: [oneOf('scopo', 'Scopo', [{ v: 'annuncio', label: 'Verifica annuncio' }, { v: 'sinistro', label: 'Sinistro / danni' }, { v: 'stato', label: 'Stato dell\'immobile' }], 'stato')],
-    proof: { kind: 'photos', photos_min: 6, gps_radius_m: 150, checklist: [yesNo('exists', 'L\'immobile corrisponde all\'indirizzo?'), note('findings', 'Rilievi', true)] },
-    instructions: ['Foto della facciata e del civico', 'Foto di ogni stanza / del danno da 2 angolazioni', 'Compila i rilievi'],
-    keywords: ['sopralluogo', 'perizia', 'sinistro', 'danni', 'immobile', 'appartamento da verificare', 'inspection'],
-    flexible: true,
-  },
-  {
-    code: 'verifica_punto_vendita', segment: 'business', name_it: 'Verifica punto vendita', name_en: 'Retail check',
-    description: 'Presenza a scaffale, vetrine, prezzi e materiali promozionali, con foto geolocalizzate.',
-    params: [num('punti_vendita', 'Punti vendita', { default: 1, min: 1, max: 20 })],
-    proof: { kind: 'photos', photos_min: 3, gps_radius_m: 250, checklist: [yesNo('on_shelf', 'Prodotto/materiale presente?'), note('notes', 'Rilievi')] },
-    instructions: ['Foto del lineare o della vetrina', 'Foto del cartellino prezzo', 'Compila i rilievi'],
-    keywords: ['scaffal', 'vetrina', 'planogram', 'punto vendita', 'retail audit', 'materiali promozionali'],
-    flexible: true,
-  },
 ];
 
 // ---- price & duration formulas (fixed price: the platform quotes, nobody haggles)
 const P = {
+  lavaggio_auto: (p) => {
+    const base = { utilitaria: 2200, berlina: 2800, suv: 3400 }[p.veicolo] ?? 2800;
+    const extra = { esterno: 0, interno_esterno: 1500, completo: 3500 }[p.tipo] ?? 1500;
+    const tipo = { esterno: 'solo esterno', interno_esterno: 'interno + esterno', completo: 'completo + igienizzazione' }[p.tipo] ?? p.tipo;
+    return {
+      lines: [[`Lavaggio ${p.veicolo} · ${tipo}`, base + extra], p.ritiro && ['Ritiro e riconsegna', 1500]],
+      minutes: 50 + (p.tipo === 'esterno' ? 0 : p.tipo === 'completo' ? 45 : 20) + (p.ritiro ? 40 : 0),
+    };
+  },
+  ritiro_consegna: () => ({ lines: [['Ritiro e consegna (entro 3 km)', 1400]], minutes: 45 }),
   giardinaggio: (p) => ({
     lines: [
       ['Uscita squadra', 3000],
@@ -197,8 +224,6 @@ const P = {
     lines: [[`Pulizia ${p.area_m2} m²`, 2500 + Math.round(p.area_m2 * 30)], p.biancheria && ['Cambio biancheria', 1500], p.check_in && ['Check-in ospite', 2000]],
     minutes: 60 + Math.round(p.area_m2 * 1.2) + (p.check_in ? 30 : 0),
   }),
-  sopralluogo_foto: () => ({ lines: [['Sopralluogo e report', 4500]], minutes: 60 }),
-  verifica_punto_vendita: (p) => ({ lines: [[`${p.punti_vendita} punti vendita`, 1600 * p.punti_vendita]], minutes: 25 * p.punti_vendita }),
 };
 
 export function formula(code) {

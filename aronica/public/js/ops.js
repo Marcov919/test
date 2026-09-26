@@ -1,6 +1,6 @@
 // Ops: live platform view — supply map, reliability tiers, verification queue,
 // dispatch cascade, event log, demo settings, API keys.
-import { h, mount, api, sse, eur, pct, hhmm, dayhhmm, toast, avatar, createMap, taskPin, workerPin, VEHICLE_IT, setClockOffset } from './common.js';
+import { h, mount, api, sse, eur, pct, hhmm, dayhhmm, toast, avatar, createMap, taskPin, workerPin, VEHICLE_IT, setClockOffset, serverNow } from './common.js';
 
 let main;
 let log;
@@ -8,10 +8,41 @@ let settingsEl;
 let map;
 let state;
 let newKey = null;
+let rankJob = null; // job id picked in the ranking panel (null = latest)
+let ranking = null;
 
 async function load() {
   state = await api('/api/ops/state');
+  try { ranking = await api(`/api/ops/ranking${rankJob ? `?job=${encodeURIComponent(rankJob)}` : ''}`); } catch { ranking = null; }
   render();
+}
+
+const REASONS_IT = {
+  suspended: 'sospeso', not_verified: 'non verificato', too_far: 'troppo lontano', pay_below_partner_minimum: 'compenso sotto la sua tariffa',
+  offline: 'offline', warning_tier_high_value: 'in avviso, lavoro di valore alto', not_available: 'non libero nella fascia', already_tried: 'già contattato',
+};
+
+function rankingSection() {
+  const r = ranking;
+  const keys = Object.keys(r?.weights ?? {});
+  const pctCell = (v) => h('td.num', {}, v == null ? '—' : Math.round(v * 100));
+  return h('section', {},
+    h('div.row.between', { style: { marginBottom: '8px', flexWrap: 'wrap', gap: '8px' } },
+      h('h3', {}, 'Classifica (perché questo partner)'),
+      h('select.input', { style: { maxWidth: '360px', padding: '6px 8px' }, onchange: (e) => { rankJob = e.target.value || null; load(); } },
+        h('option', { value: '' }, 'Ultimo incarico'),
+        state.jobs.map((j) => h('option', { value: j.id, selected: j.id === rankJob }, `${j.title} · ${j.status}`)))),
+    !r?.job ? h('div.small.muted', {}, 'Nessun incarico ancora.') : h('div', {},
+      h('div.xs.faint', { style: { marginBottom: '6px' } }, `${r.job.title} · pesi: ${keys.map((k) => `${r.labels_it[k]} ${Math.round(r.weights[k] * 100)}%`).join(' · ')} · solo partner disponibili che accettano il prezzo fisso`),
+      h('div.tablewrap', {}, h('table.table', {},
+        h('thead', {}, h('tr', {}, ['#', 'Partner', ...keys.map((k) => r.labels_it[k].split(' (')[0]), 'Score', 'Offerta'].map((x) => h('th', {}, x)))),
+        h('tbody', {}, r.rows.length ? r.rows.map((x) => h('tr', { style: x.excluded ? { opacity: 0.55 } : {} },
+          h('td.num', {}, x.rank ?? '—'),
+          h('td', {}, h('b', {}, x.name), h('div.xs.faint', {}, `${x.kind === 'business' ? 'Attività' : 'Persona'} · ${x.zone}`)),
+          ...(x.excluded ? [h('td.xs', { colspan: keys.length + 1 }, `Escluso: ${x.excluded.map((e) => REASONS_IT[e] ?? e).join(', ')}`)] : [...keys.map((k) => pctCell(x.breakdown[k])), h('td.num', {}, h('b', {}, x.score))]),
+          h('td', {}, x.offer ? h('span.badge', { class: x.offer === 'accepted' ? 'green' : x.offer === 'pending' ? 'blue' : x.offer === 'declined' || x.offer === 'expired' ? 'red' : '' }, x.offer) : null)))
+          : h('tr', {}, h('td.muted', { colspan: keys.length + 4 }, 'Nessun partner per questo servizio: risposta onesta, nessun match inventato.'))))),
+      r.not_offering_service ? h('div.xs.faint', { style: { marginTop: '4px' } }, `${r.not_offering_service} partner non offrono questo servizio.`) : null));
 }
 
 let t = null;
@@ -59,7 +90,7 @@ function render() {
       w.status === 'active' ? h('button.btn.sm', { onclick: () => act(`/api/ops/workers/${w.id}/toggle-online`) }, w.online ? 'Metti offline' : 'Metti online') : null)));
 
   const jobRow = (j) => h('tr', {},
-    h('td', {}, h('b', {}, j.title), h('div.xs.faint', {}, `${j.id} · ${j.skill} · ${j.agent_name}`)),
+    h('td', {}, h('b', {}, j.title), h('div.xs.faint', {}, `${j.id} · ${j.service} · ${j.agent_name}${j.mode === 'now' ? ' · adesso' : ''}`)),
     h('td', {}, h('span.badge', { class: j.status === 'done' ? 'green' : ['no_match', 'expired', 'cancelled'].includes(j.status) ? 'red' : 'blue' }, j.status)),
     h('td.num', {}, eur(j.price?.total_cents)),
     h('td', {}, j.headcount > 1 ? `${j.seats_filled}/${j.headcount} posti` : (j.assignments.find((a) => !['cancelled', 'no_show'].includes(a.status))?.worker.alias ?? (j.dispatch ? `offerte ${j.dispatch.tried}` : '—')), h('div.xs.faint', {}, j.slot?.label ?? j.window?.label ?? '')),
@@ -70,7 +101,8 @@ function render() {
     h('td.num', {}, `#${o.rank}`),
     h('td', {}, o.display_name),
     h('td.num', {}, o.score),
-    h('td', {}, h('span.badge', { class: o.status === 'accepted' ? 'green' : o.status === 'pending' ? 'blue' : '' }, o.status)),
+    h('td', {}, h('span.badge', { class: o.status === 'accepted' ? 'green' : o.status === 'pending' ? 'blue' : o.status === 'declined' || o.status === 'expired' ? 'red' : '' }, o.status)),
+    h('td.num', {}, o.status === 'pending' ? h('span', { 'data-ttl': o.expires_at }, '') : `${Math.round((new Date(o.expires_at) - new Date(o.created_at)) / 1000)}s`),
     h('td.num', {}, hhmm(o.created_at)));
 
   mount(main,
@@ -80,6 +112,7 @@ function render() {
       h('div.stat', {}, h('b', {}, done.length), h('span', {}, 'Completati (recenti)')),
       h('div.stat', {}, h('b', {}, pending.length), h('span', {}, 'Da verificare')),
       h('div.stat', {}, h('b', {}, W.filter((w) => w.status === 'suspended').length), h('span', {}, 'Sospesi'))),
+    rankingSection(),
     h('section', {}, h('h3', { style: { marginBottom: '8px' } }, 'Partner (persone e attività)'),
       h('div.tablewrap', {}, h('table.table', {},
         h('thead', {}, h('tr', {}, ['Partner', 'Affidabilità', 'Valutazione', 'Complet.', 'Accett.', 'No-show', 'Stato', 'Competenze', ''].map((x) => h('th', {}, x)))),
@@ -88,7 +121,7 @@ function render() {
       h('div.tablewrap', {}, h('table.table', {},
         h('thead', {}, h('tr', {}, ['Lavoro', 'Stato', 'Prezzo', 'Persone / slot', 'Creato'].map((x) => h('th', {}, x)))),
         h('tbody', {}, state.jobs.length ? state.jobs.map(jobRow) : h('tr', {}, h('td.muted', { colspan: 5 }, 'Nessun lavoro ancora. Crea una richiesta dal Buyer console o da un agente.')))))),
-    h('section', {}, h('h3', { style: { marginBottom: '8px' } }, 'Assegnazioni e contratti'),
+    h('section', {}, h('h3', { style: { marginBottom: '8px' } }, 'Assegnazioni (contratti: stub)'),
       h('div.tablewrap', {}, h('table.table', {},
         h('thead', {}, h('tr', {}, ['Lavoro', 'Partner', 'Stato', 'Contratto', 'Compenso', ''].map((x) => h('th', {}, x)))),
         h('tbody', {}, state.assignments.length ? state.assignments.map((a) => h('tr', {},
@@ -98,8 +131,8 @@ function render() {
           h('td', {}, ['assigned', 'en_route'].includes(a.status) ? h('button.btn.sm', { onclick: () => act(`/api/ops/assignments/${a.id}/no-show`) }, 'Simula no-show') : null))) : h('tr', {}, h('td.muted', { colspan: 6 }, '—')))))),
     h('section', {}, h('h3', { style: { marginBottom: '8px' } }, 'Offerte a tempo (cascata)'),
       h('div.tablewrap', {}, h('table.table', {},
-        h('thead', {}, h('tr', {}, ['Job', 'Rank', 'Partner', 'Score', 'Esito', 'Inviata'].map((x) => h('th', {}, x)))),
-        h('tbody', {}, state.offers.length ? state.offers.map(offerRow) : h('tr', {}, h('td.muted', { colspan: 6 }, '—')))))),
+        h('thead', {}, h('tr', {}, ['Job', 'Rank', 'Partner', 'Score', 'Esito', 'TTL', 'Inviata'].map((x) => h('th', {}, x)))),
+        h('tbody', {}, state.offers.length ? state.offers.map(offerRow) : h('tr', {}, h('td.muted', { colspan: 7 }, '—')))))),
     h('section', {}, h('h3', { style: { marginBottom: '8px' } }, 'API key per agenti'),
       h('div.tablewrap', {}, h('table.table', {}, h('tbody', {}, state.accounts.map((a) => h('tr', {}, h('td', {}, a.name), h('td', {}, h('span.badge', {}, a.kind === 'business' ? 'Azienda' : 'Privato')), h('td.mono', {}, a.api_key), h('td.xs.faint', {}, a.created_at)))))),
       newKey ? h('div.card.flat.small', { style: { marginTop: '8px' } }, 'Nuova chiave (mostrata una sola volta): ', h('b.mono', {}, newKey)) : null,
@@ -114,7 +147,16 @@ function render() {
         }, 'Crea chiave'))));
 
   drawMap();
+  tickTtl();
 }
+
+// Live countdown for pending offers.
+function tickTtl() {
+  for (const el of main.querySelectorAll('[data-ttl]')) {
+    el.textContent = `${Math.max(0, Math.round((new Date(el.dataset.ttl) - serverNow()) / 1000))}s`;
+  }
+}
+setInterval(() => { if (main) tickTtl(); }, 1000);
 
 function drawMap() {
   const seen = new Set();

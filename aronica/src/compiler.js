@@ -5,13 +5,15 @@
 // typed params directly (see list_services → params) and use this to validate.
 import { listServices, getService, normalizeParams } from './services.js';
 import { quote } from './pricing.js';
-import { geocode, inServiceArea, CITY } from './geo.js';
+import { geocode, inServiceArea, haversineKm, CITY } from './geo.js';
 import { romeParts, romeTime, slotLabel, durationLabel } from './time.js';
 import { clock, HttpError, NO_SUPPLY_IT } from './util.js';
 
 const norm = (s) => ` ${String(s || '').toLowerCase().normalize('NFD').replace(/\p{M}/gu, '').replace(/['’]/g, ' ').replace(/\s+/g, ' ')} `;
 
 // Lifestyle / regulated services Aronica deliberately does NOT do.
+export const ERRAND_RADIUS_KM = 3;
+
 export const OUT_OF_SCOPE = [
   'capoeira', 'insegnante', 'teacher', 'lezione', 'lesson', 'tutor', 'ripetizioni', 'nails', 'unghie', 'manicure',
   'pedicure', 'dentist', 'medico', 'doctor', 'infermier', 'badante', 'parrucchier', 'haircut', 'barbier', 'massagg',
@@ -74,8 +76,23 @@ function extractParams(service, t) {
   if (/muletto/.test(t)) p.muletto = true;
   if (/biancheria/.test(t)) p.biancheria = true;
   if (/check.?in|accogliere (gli )?ospit/.test(t)) p.check_in = true;
-  if (/sinistro|danni|allagament/.test(t)) p.scopo = 'sinistro';
-  else if (/annuncio/.test(t)) p.scopo = 'annuncio';
+  if (service.code === 'lavaggio_auto') {
+    if (/\b(suv|monovolume|fuoristrada|crossover)\b/.test(t)) p.veicolo = 'suv';
+    else if (/\b(utilitaria|city ?car|panda|500|yaris|clio|smart)\b/.test(t)) p.veicolo = 'utilitaria';
+    else if (/\b(berlina|station|wagon|sw|golf|audi|bmw)\b/.test(t)) p.veicolo = 'berlina';
+    if (/igienizz|sanific|completo/.test(t)) p.tipo = 'completo';
+    else if (/intern[oi]\s*(\+|e|ed|and)\s*estern[oi]|estern[oi]\s*(\+|e|ed|and)\s*intern[oi]|dentro e fuori|interni/.test(t)) p.tipo = 'interno_esterno';
+    else if (/solo (l )?estern|\bestern[oi]\b/.test(t)) p.tipo = 'esterno';
+    if (/sotto casa|a domicilio|carrello|senza spostar|in garage|in cortile/.test(t)) p.ritiro = false;
+    else if (/riport|ritir|portala|porta la (mia )?(auto|macchina)|porta l auto|all autolavaggio|pick.?up/.test(t)) p.ritiro = true;
+  }
+  if (service.code === 'ritiro_consegna') {
+    if (/farmac|medicin|ricetta/.test(t)) p.cosa = 'farmaco';
+    else if (/\bchiav/.test(t)) p.cosa = 'chiavi';
+    else if (/busta|document|lettera|contratto/.test(t)) p.cosa = 'documenti';
+    const at = /\b(?:da|dal|dalla|dallo|presso|in|alla|al)\s+((?:farmacia|portineria|negozio|ufficio|tabaccheria|edicola|bar|studio|via|corso|piazza|viale)\b[^,.;]*?)(?=\s+(?:e|entro|per|oggi|domani|stasera|alle|a casa|portal[aoie]|portamel[aoie]|consegna)\b|[,.;]|\s*$)/.exec(t);
+    if (at) p.ritiro_presso = at[1].trim();
+  }
   if (service.code === 'commissione_acquisto') {
     const art = /(?:comprar(?:e|mi|ci)|comprami|acquistare|prendermi|prendere)\s+(.+?)(?:\s+(?:da|in|al|alla|presso|entro|per|max|massimo|fino)\b|[,.]|$)/.exec(t);
     if (art) p.articolo = art[1].trim();
@@ -130,9 +147,12 @@ export function extractWhen(t, now) {
 }
 
 // ---- compile ------------------------------------------------------------------
-function failClosed(code, detail) {
-  return new HttpError(422, code, NO_SUPPLY_IT, { detail });
+// reason: short machine-friendly label shown next to the honest message.
+function failClosed(code, detail, reason) {
+  return new HttpError(422, code, NO_SUPPLY_IT, { detail, reason });
 }
+
+const NOW_RE = /\b(adesso|subito|al piu presto|appena possibile|asap|right now)\b/;
 
 export function compileTask(input = {}) {
   const now = clock.now();
@@ -142,15 +162,15 @@ export function compileTask(input = {}) {
   let classification = null;
   if (input.service) {
     service = getService(String(input.service));
-    if (!service) throw failClosed('unsupported_service', `Il servizio "${input.service}" non esiste nel catalogo Aronica.`);
+    if (!service) throw failClosed('unsupported_service', `Il servizio "${input.service}" non esiste nel catalogo Aronica.`, 'fuori ambito v1');
   } else {
     if (!textIn.trim()) throw new HttpError(400, 'text_required', 'Descrivi il lavoro (text) oppure indica service e params.');
     classification = classify(textIn);
     if (!classification?.service) {
       const why = classification?.out_of_scope?.length
-        ? `Fuori ambito per Aronica v1 (${classification.out_of_scope.join(', ')}): servizi regolamentati o "lifestyle" non sono coperti.`
-        : 'Nessun servizio del catalogo corrisponde alla richiesta.';
-      throw failClosed('unsupported_task', why);
+        ? `Lezioni, insegnanti, servizi lifestyle o regolamentati non sono coperti (${classification.out_of_scope.join(', ')}). Nessun partner viene contattato.`
+        : 'Nessun servizio del catalogo corrisponde alla richiesta. Nessun partner viene contattato.';
+      throw failClosed('unsupported_task', why, 'fuori ambito v1');
     }
     service = classification.service;
   }
@@ -162,18 +182,32 @@ export function compileTask(input = {}) {
   const loc = input.location ?? {};
   if (loc.lat != null && loc.lng != null) location = { lat: Number(loc.lat), lng: Number(loc.lng), address: loc.address ?? null };
   else {
-    const g = geocode(`${loc.address ?? ''} ${textIn}`);
+    // Errands: the pick-up place is not where the job ends; don't geocode it as the address.
+    const where = params.ritiro_presso ? t.replace(norm(params.ritiro_presso).trim(), ' ') : textIn;
+    const g = geocode(`${loc.address ?? ''} ${where}`);
     if (g) location = { lat: g.lat, lng: g.lng, address: loc.address || g.matched };
   }
-  if (location && !inServiceArea(location)) throw failClosed('outside_service_area', `Fuori dall'area servita (Milano, ${CITY.radius_km} km dal Duomo).`);
+  if (location && !inServiceArea(location)) throw failClosed('outside_service_area', `Fuori dall'area servita (Milano, ${CITY.radius_km} km dal Duomo).`, 'fuori area v1');
+  // Tight-radius errands: pick-up and drop-off must be close (v1: 3 km).
+  if (service.code === 'ritiro_consegna' && location && params.ritiro_presso) {
+    const from = geocode(params.ritiro_presso);
+    if (from && haversineKm(from, location) > ERRAND_RADIUS_KM) {
+      throw failClosed('outside_errand_radius', `Ritiro a ${Math.round(haversineKm(from, location) * 10) / 10} km dalla consegna: in v1 facciamo solo ritiri entro ${ERRAND_RADIUS_KM} km.`, 'fuori raggio v1');
+    }
+  }
 
   // When
   const questions = [];
   let when = null;
-  if (input.window?.start) {
+  // Adesso (as soon as possible, within 3h) vs Programma (a window).
+  const mode = input.mode === 'now' || input.mode === 'scheduled' ? input.mode : (!input.window?.start && NOW_RE.test(t) ? 'now' : 'scheduled');
+  if (mode === 'now') {
+    when = { start: now, end: now + 3 * 3600000, explicitDay: true, explicitTime: true };
+  } else if (input.window?.start) {
     when = { start: Date.parse(input.window.start), end: input.window.end ? Date.parse(input.window.end) : null, explicitDay: true, explicitTime: true };
     if (Number.isNaN(when.start)) throw new HttpError(400, 'invalid_window', 'window.start non è una data valida');
   } else when = extractWhen(t, now);
+  if (mode === 'scheduled' && when && when.start < now + 45 * 60000 && !input.window?.start) when.start = now + 45 * 60000;
   const fixed = !service.flexible;
   if (!when) {
     const p = romeParts(now);
@@ -190,11 +224,12 @@ export function compileTask(input = {}) {
     if (when.end && when.end > when.start) params.ore = Math.max(1, Math.round((when.end - when.start) / 3600000));
     minutes = params.ore * 60;
     when.end = when.start + minutes * 60000;
+    if (when.explicitTime) assumed.splice(assumed.indexOf('ore') >>> 0, assumed.includes('ore') ? 1 : 0);
   }
   const q = quote(service, params, { start: when.start, minutes: minutes ?? 0, now });
   minutes = q.minutes;
   if (!when.end || when.end - when.start < minutes * 60000) when.end = when.start + minutes * 60000;
-  const flexible = !!service.flexible && when.end - when.start > minutes * 60000;
+  const flexible = mode === 'now' || (!!service.flexible && when.end - when.start > minutes * 60000);
 
   for (const k of assumed) {
     const f = service.params.find((x) => x.key === k);
@@ -215,7 +250,11 @@ export function compileTask(input = {}) {
     assumed,
     questions,
     location,
-    window: { start: new Date(when.start).toISOString(), end: new Date(when.end).toISOString(), flexible, label: flexible ? `${slotLabel(when.start, Math.round((when.end - when.start) / 60000))} (inizio flessibile)` : slotLabel(when.start, minutes) },
+    mode,
+    window: {
+      start: new Date(when.start).toISOString(), end: new Date(when.end).toISOString(), flexible,
+      label: mode === 'now' ? `Adesso · appena c'è un partner, entro le ${slotLabel(when.end, 0).split(' · ')[1].split('–')[0]}` : flexible ? `${slotLabel(when.start, Math.round((when.end - when.start) / 60000))} (inizio flessibile)` : slotLabel(when.start, minutes),
+    },
     duration_min: minutes,
     duration_label: durationLabel(minutes),
     headcount,
@@ -236,7 +275,8 @@ function titleFor(s, p, n) {
     case 'facchinaggio_allestimento': return `${n} facchini · allestimento`;
     case 'staff_eventi': return `${n} ${p.ruolo}${n > 1 && p.ruolo === 'hostess' ? '' : ''} per evento`;
     case 'turnover_affitti': return `Turnover appartamento ${p.area_m2} m²${p.biancheria ? ' + biancheria' : ''}`;
-    case 'sopralluogo_foto': return `Sopralluogo · ${p.scopo}`;
+    case 'lavaggio_auto': return `Lavaggio auto ${p.veicolo} · ${{ esterno: 'solo esterno', interno_esterno: 'interno + esterno', completo: 'completo' }[p.tipo] ?? p.tipo}${p.ritiro ? ' · ritiro e riconsegna' : ' · sotto casa'}`;
+    case 'ritiro_consegna': return `Ritiro ${{ farmaco: 'farmaco', chiavi: 'chiavi', documenti: 'busta/documenti', pacco: 'pacco' }[p.cosa] ?? ''}${p.ritiro_presso ? ` da ${p.ritiro_presso}` : ''} e consegna`;
     default: return s.name_it;
   }
 }

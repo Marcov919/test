@@ -17,14 +17,14 @@ function b64ToBytes(b64) {
 }
 
 let opsMounted = false;
-let phoneWorker = 'w_giulia';
+let phoneWorker = 'b_washgo';
 let followOffers = true;
 
 async function switchPhone(workerId, alias) {
   const r = await fetch('/api/worker/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ worker_id: workerId }) }).then((x) => x.json());
   try { localStorage.setItem('aronica.worker_token', r.token); } catch { /* */ }
   await mountWorker($('#worker-root'), { autoLogin: workerId, demo: true, token: r.token });
-  $('#phone-cap').textContent = `App Partner · ${alias} (riceve l'offerta n. 1)`;
+  $('#phone-cap').textContent = `App Partner · ${alias} (ha ricevuto l'offerta)`;
   toast(`Il telefono ora è quello di ${alias}: ha ricevuto l'offerta`);
 }
 function show(view) {
@@ -63,9 +63,14 @@ async function main() {
   const es = new EventSource('/api/stream?ops=1');
   es.addEventListener('dispatch.offer_sent', (m) => {
     const e = JSON.parse(m.data);
-    if (!followOffers || e.data.rank !== 1) return;
-    // The phone follows the #1 offer: log in as that partner (demo convenience).
-    if (e.worker_id !== phoneWorker && !phoneBusy()) { phoneWorker = e.worker_id; switchPhone(e.worker_id, e.data.alias); }
+    if (!followOffers || (e.data.rank !== 1 && e.data.headcount !== 1)) return;
+    // The phone follows the offer (#1, then the cascade on single-person jobs): log in as that partner (demo convenience).
+    // After a decline the phone may still be closing the previous offer: retry briefly.
+    const trySwitch = (n) => {
+      if (e.worker_id === phoneWorker) return;
+      if (!phoneBusy()) { phoneWorker = e.worker_id; switchPhone(e.worker_id, e.data.alias); } else if (n > 0) setTimeout(() => trySwitch(n - 1), 300);
+    };
+    trySwitch(6);
     if (getComputedStyle($('.seg-live')).display !== 'none') showSide('worker');
   });
 }

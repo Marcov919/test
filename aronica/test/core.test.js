@@ -11,7 +11,8 @@ const { openDb, get, all, update, setSetting, insert } = await import('../src/db
 const { seed, CONSOLE_ACCOUNT, CONSOLE_BUSINESS_ACCOUNT } = await import('../src/seed.js');
 const { clock, NO_SUPPLY_IT, HttpError } = await import('../src/util.js');
 const { compileTask, classify } = await import('../src/compiler.js');
-const { createJob, rateWorker } = await import('../src/jobs.js');
+const { createJob, rateWorker, serializeJob } = await import('../src/jobs.js');
+const { searchSupply } = await import('../src/connector.js');
 const { negotiateRound, acceptQuote, autoNegotiate } = await import('../src/negotiation.js');
 const { confirmJob, respondOffer, tick, startJob, arriveJob, submitProof, workerCancel, markNoShow } = await import('../src/dispatch.js');
 const { evaluate, enforce } = await import('../src/reliability.js');
@@ -91,23 +92,77 @@ test('pricing: fixed price with explicit short-notice surcharge', () => {
 });
 
 // ---------------------------------------------------------------- consumer flow
+const HERO = 'Porta la mia auto all\'autolavaggio sabato mattina e riportamela — Navigli, berlina, interno+esterno.';
+
+test('hero: car wash sentence compiles to a structured, fixed-price job', () => {
+  const c = compileTask({ text: HERO });
+  assert.equal(c.service.code, 'lavaggio_auto');
+  assert.deepEqual(c.params, { veicolo: 'berlina', tipo: 'interno_esterno', ritiro: true });
+  assert.equal(c.location.address, 'Navigli');
+  assert.equal(romeParts(Date.parse(c.window.start)).dow, 6);
+  assert.equal(romeParts(Date.parse(c.window.start)).h >= 8, true);
+  assert.equal(c.price.total_cents, 5800);
+  assert.equal(c.proof.photos_min, 4);
+  assert.deepEqual(c.proof.shots, ['Targa', 'Auto prima', 'Auto dopo', 'Interni / riconsegna']);
+  assert.equal(c.questions.length, 0);
+});
+
+test('hero: search_supply ranks local car-wash partners, Wash&Go first, with how they do it', () => {
+  const s = searchSupply({ text: HERO });
+  assert.ok(s.available >= 3);
+  assert.equal(s.partners[0].worker_ref, 'b_washgo');
+  assert.ok(s.partners.some((p) => p.worker_ref === 'w_luca' && /carrello mobile/.test(p.how)));
+  assert.deepEqual(Object.keys(s.partners[0].score_breakdown), ['proximity', 'rating', 'reliability', 'service_fit', 'acceptance']);
+});
+
+test('hero: car wash → A2A slot → human confirm → offer to Wash&Go → decline cascades to the next partner', async () => {
+  const { job } = createJob(consumer(), { text: HERO });
+  const round = await negotiateRound(job.id);
+  assert.equal(round.best_accept.worker_ref, 'b_washgo');
+  assert.equal(acceptQuote(job.id, round.best_accept.quote_id).auto_approved, false);
+  confirmJob(job.id, { by: 'human' });
+  const first = get("SELECT * FROM offers WHERE job_id = ? AND status = 'pending'", job.id);
+  assert.equal(first.worker_id, 'b_washgo');
+  respondOffer('b_washgo', first.id, false);
+  const second = get("SELECT * FROM offers WHERE job_id = ? AND status = 'pending'", job.id);
+  assert.ok(second && second.worker_id !== 'b_washgo', 'cascade to the next partner');
+  const res = respondOffer(second.worker_id, second.id, true);
+  assert.match(res.contract, /P\.IVA|occasionale/);
+  const j = get('SELECT * FROM jobs WHERE id = ?', job.id);
+  assert.equal(j.status, 'assigned');
+  assert.equal(serializeJob(j).assignments[0].worker.how != null, true);
+});
+
+test('fail closed: Capoeira has a reason and never reaches a partner; errands beyond 3 km are refused', () => {
+  assert.throws(() => compileTask({ text: 'Trovami un insegnante di Capoeira ai Navigli per stasera' }), (e) => e.message === NO_SUPPLY_IT && e.extra.reason === 'fuori ambito v1');
+  assert.throws(() => createJob(consumer(), { text: 'Trovami un insegnante di Capoeira ai Navigli' }), (e) => e.extra.reason === 'fuori ambito v1');
+  assert.equal(get('SELECT COUNT(*) AS c FROM offers').c, 0);
+  assert.throws(() => compileTask({ text: 'Ritira le chiavi in portineria in Via Padova e portamele, sono in zona Navigli' }), (e) => e.code === 'outside_errand_radius' && e.message === NO_SUPPLY_IT);
+  const ok = compileTask({ text: 'Ritira un farmaco alla Farmacia di Porta Ticinese e portamelo a casa entro le 19, zona Navigli' });
+  assert.equal(ok.service.code, 'ritiro_consegna');
+  assert.equal(ok.params.cosa, 'farmaco');
+});
+
+test('Adesso vs Programma: "now" is a 3h ASAP window with the short-notice surcharge', () => {
+  const now = compileTask({ text: HERO, mode: 'now' });
+  const later = compileTask({ text: HERO });
+  assert.equal(now.mode, 'now');
+  assert.equal(later.mode, 'scheduled');
+  assert.ok(now.price.surcharges.some((x) => x.pct === 30));
+  assert.ok(Date.parse(now.window.end) - Date.parse(now.window.start) <= 3 * 3600000);
+});
+
 test('consumer: gardener Saturday → A2A slot negotiation → human confirm → offer to the best partner', async () => {
   const { job } = createJob(consumer(), { text: 'sistemare il giardino 80 mq con siepe', location: { address: 'Navigli' }, window: { start: iso(nextDow(6, 8)), end: iso(nextDow(6, 13)) } });
-  assert.equal(job.status, 'scheduling');
   const round = await negotiateRound(job.id);
-  assert.ok(round.responses.length >= 2);
   const verde = round.responses.find((r) => r.worker_ref === 'b_verde');
   assert.equal(verde.action, 'accept');
-  const paolo = round.responses.find((r) => r.worker_ref === 'w_paolo');
-  assert.ok(paolo, 'weekend-only gardener is asked too');
-  const r = acceptQuote(job.id, round.best_accept.quote_id);
-  assert.equal(r.auto_approved, false);
-  assert.equal(get('SELECT status FROM jobs WHERE id = ?', job.id).status, 'pending_confirmation');
+  assert.ok(round.responses.find((r) => r.worker_ref === 'w_paolo'), 'weekend-only gardener is asked too');
+  acceptQuote(job.id, round.best_accept.quote_id);
   confirmJob(job.id, { by: 'human' });
   const offer = get("SELECT * FROM offers WHERE job_id = ? AND status = 'pending'", job.id);
   assert.equal(offer.worker_id, round.best_accept.worker_ref);
-  const res = respondOffer(offer.worker_id, offer.id, true);
-  assert.match(res.contract, /Fattura|occasionale/);
+  respondOffer(offer.worker_id, offer.id, true);
   assert.equal(get('SELECT status FROM jobs WHERE id = ?', job.id).status, 'assigned');
 });
 

@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { timingSafeEqual } from 'node:crypto';
 import { openDb, get, all, update, insert, getSetting, setSetting } from './db.js';
 import { seed, CONSOLE_ACCOUNT, CONSOLE_BUSINESS_ACCOUNT } from './seed.js';
-import { TOOLS, callTool, accountFromKey, openAiTools } from './connector.js';
+import { TOOLS, callTool, accountFromKey, openAiTools, searchSupply } from './connector.js';
 import { handleMcpHttp } from './mcp.js';
 import { openApiSpec } from './openapi.js';
 import { openSse, eventsForJob, recentEvents, realGps } from './events.js';
@@ -14,7 +14,7 @@ import { compileTask } from './compiler.js';
 import { CAPS, ROUTES } from './compliance.js';
 import { CITY, GAZETTEER, VEHICLES, geocode, inServiceArea } from './geo.js';
 import { RATING_TAGS, THRESHOLDS, evaluate, enforce } from './reliability.js';
-import { WEIGHTS } from './matching.js';
+import { WEIGHTS, WEIGHT_LABELS_IT, rankCandidates } from './matching.js';
 import { createJob, serializeJob, serializeAssignment, loadJob, rateWorker, publicWorker, BASE_URL } from './jobs.js';
 import { autoNegotiate, acceptQuote, quotesForJob } from './negotiation.js';
 import {
@@ -177,6 +177,7 @@ function config() {
     rating_tags: RATING_TAGS,
     vehicles: VEHICLES,
     weights: WEIGHTS,
+    weight_labels: WEIGHT_LABELS_IT,
     thresholds: THRESHOLDS,
     no_supply_message: NO_SUPPLY_IT,
     base_url: BASE_URL(),
@@ -225,6 +226,7 @@ route('GET', '/api/geocode', ({ res, url }) => {
 // Buyer console (human). Two console accounts: a private person and a company.
 const consoleAccount = (b) => get('SELECT * FROM accounts WHERE id = ?', b.account === 'business' ? CONSOLE_BUSINESS_ACCOUNT : CONSOLE_ACCOUNT);
 route('POST', '/api/console/compile', ({ res, body }) => json(res, 200, compileTask(parseJson(body))));
+route('POST', '/api/console/supply', ({ res, body }) => json(res, 200, searchSupply(parseJson(body))));
 route('POST', '/api/console/jobs', ({ res, body }) => {
   const input = parseJson(body);
   const account = consoleAccount(input);
@@ -414,6 +416,21 @@ route('POST', '/api/ops/clock', ({ req, res, url, body }) => {
   emit('clock.changed', { data: { offset_ms: clockOffset(), now: iso(clock.now()) } });
   tick();
   json(res, 200, { now: iso(clock.now()), offset_ms: clockOffset() });
+});
+// Explain the ranking for one job: every partner, filters that excluded them, score breakdown.
+route('GET', '/api/ops/ranking', ({ req, res, url }) => {
+  requireOps(req, url);
+  const jobId = url.searchParams.get('job') ?? get('SELECT id FROM jobs ORDER BY created_at DESC LIMIT 1')?.id;
+  if (!jobId) return json(res, 200, { job: null, weights: WEIGHTS, labels_it: WEIGHT_LABELS_IT, rows: [] });
+  const job = loadJob(jobId);
+  const { eligible, excluded } = rankCandidates(job, { explain: true });
+  const names = Object.fromEntries(all('SELECT id, display_name, kind, zone FROM workers').map((w) => [w.id, w]));
+  const offers = Object.fromEntries(all('SELECT worker_id, status FROM offers WHERE job_id = ? ORDER BY created_at', job.id).map((o) => [o.worker_id, o.status]));
+  const rows = [
+    ...eligible.map((c) => ({ worker_id: c.worker.id, name: c.worker.display_name, kind: c.worker.kind, zone: c.worker.zone, rank: c.rank, score: c.score, breakdown: c.breakdown, distance_km: c.distance_km, rating: c.rating, offer: offers[c.worker.id] ?? null, excluded: null })),
+    ...excluded.filter((e) => names[e.worker_id] && !e.reasons.includes('missing_service')).map((e) => ({ worker_id: e.worker_id, name: names[e.worker_id].display_name, kind: names[e.worker_id].kind, zone: names[e.worker_id].zone, rank: null, score: null, breakdown: null, offer: offers[e.worker_id] ?? null, excluded: e.reasons })),
+  ];
+  json(res, 200, { job: { id: job.id, title: job.title, status: job.status, service: job.service }, weights: WEIGHTS, labels_it: WEIGHT_LABELS_IT, rows, not_offering_service: excluded.filter((e) => e.reasons.includes('missing_service')).length });
 });
 route('POST', '/api/ops/assignments/:id/no-show', ({ req, res, url, params }) => {
   requireOps(req, url);

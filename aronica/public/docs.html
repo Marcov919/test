@@ -26,15 +26,16 @@
   <p class="toc small"><a href="#flow">Flow</a><a href="#claude">Claude</a><a href="#openai">OpenAI</a><a href="#grok">Grok</a><a href="#rest">REST</a><a href="#tools">Tools</a><a href="#honest">Fail-closed</a></p>
 
   <h2 id="flow">Flow</h2>
+  <p>Aronica is the physical hand of a personal assistant in Milano: car wash (pick-up &amp; return, or mobile wash), waiting at home for a technician or courier, local pick-up &amp; drop-off (pharmacy, keys, envelope; max 3 km), IKEA assembly and small handyman jobs. Business staffing is experimental.</p>
   <ol>
-    <li><code>compile_task</code> &rarr; turn the user's words ("sistemare il giardino sabato mattina, 80 mq con siepe" / "4 facchini venerd&igrave; 7-12 in Fiera") into a structured job: service, typed params, window, headcount, duration, <b>fixed price</b> with breakdown, proof, open questions. Confirm the open questions with your user.</li>
-    <li><code>create_job</code> &rarr; the job exists; fails closed if out of scope or nobody can do it.</li>
-    <li><code>negotiate</code> / <code>auto_negotiate</code> &rarr; A2A round on <b>when</b> (never on price): supplier agents check their partner's calendar and reply accept (start time, seats covered), counter (another slot) or decline.</li>
-    <li><code>accept_quote</code> &rarr; slot locked. <b>Consumers</b>: send <code>confirm_url</code> to your human (one tap). <b>Business accounts</b>: auto-approved under the company policy threshold and dispatched immediately.</li>
-    <li>Dispatch: one timed offer per open seat, highest score first, in parallel, with a per-supplier concentration cap; each person gets the right contract (PrestO, supplier invoice, or partner agency when caps are exceeded). No-shows are replaced automatically.</li>
-    <li><code>wait_for_update</code> until <code>done</code>; <code>get_job</code> for seats, contracts, proof (photos or check-in/check-out timesheet), escrow and invoice; <code>rate_worker</code>.</li>
+    <li><code>compile_task</code> &rarr; the user's words ("Porta la mia auto all'autolavaggio sabato mattina e riportamela, Navigli, berlina, interno+esterno") become a structured job: service, typed params, window, duration, <b>fixed price</b> with breakdown, proof (e.g. photos of plate, before, after + GPS), open questions. <code>mode</code>: <code>now</code> (Adesso, within 3h) or <code>scheduled</code> (Programma).</li>
+    <li><code>search_supply</code> &rarr; who is actually available for that job, ranked by proximity, rating, reliability, service fit and acceptance, with how each partner does it. Zero means zero: no fake matches.</li>
+    <li><code>create_job</code> &rarr; the job exists; fails closed (with a <code>reason</code>, e.g. <code>fuori ambito v1</code>) if out of scope or nobody can do it.</li>
+    <li><code>negotiate</code> / <code>auto_negotiate</code> &rarr; A2A round on <b>when</b> (never on price): supplier agents check their partner's calendar and reply accept, counter (another slot) or decline.</li>
+    <li><code>accept_quote</code> &rarr; slot locked; send <code>confirm_url</code> to your human (one tap). Then a timed offer goes to the best partner (TTL 20s): accept assigns the job, decline or timeout cascades to the next one; an exhausted list returns the honest message.</li>
+    <li><code>wait_for_update</code> until <code>done</code>; <code>get_job</code> for the partner, status and proof; <code>rate_worker</code>.</li>
   </ol>
-  <p class="small muted">Demo keys: <code>ak_demo_milano</code> (personal assistant, human confirms) &middot; <code>ak_demo_business</code> (Aurora Eventi, auto-approval up to &euro;600).</p>
+  <p class="small muted">Demo key: <code>ak_demo_milano</code> (personal assistant, human confirms). Experimental business key: <code>ak_demo_business</code>. Simulated in this build: supplier agents (server-side), seed partners, escrow/payments, KYC.</p>
 
   <h2 id="claude">Claude</h2>
   <h3>Claude Code</h3>
@@ -58,7 +59,7 @@
     "max_tokens": 16000,
     "mcp_servers": [{ "type": "url", "url": "https://YOUR-PUBLIC-HOST/mcp", "name": "aronica", "authorization_token": "ak_demo_milano" }],
     "tools": [{ "type": "mcp_toolset", "mcp_server_name": "aronica" }],
-    "messages": [{ "role": "user", "content": "Plan my week. The garden needs sorting (about 80 m2, with a hedge); Saturday morning works, I live near Navigli." }]
+    "messages": [{ "role": "user", "content": "I have a busy Saturday. Get my car washed Saturday morning, inside and out, picked up and brought back. I live near Navigli, it is a sedan." }]
   }'</code></pre>
   <p class="small muted">Set <code>ARONICA_PUBLIC_URL</code> on the server so <code>confirm_url</code> links point at your public host.</p>
 
@@ -68,7 +69,7 @@
   "model": "&lt;your model&gt;",
   "tools": [{ "type": "mcp", "server_label": "aronica", "server_url": "https://YOUR-PUBLIC-HOST/mcp",
               "headers": { "Authorization": "Bearer ak_demo_milano" }, "require_approval": "never" }],
-  "input": "We need 4 movers at Fiera Milano Rho next Friday 7-12 for our stand set-up."
+  "input": "Someone needs to wait at my flat in Porta Romana tomorrow 9-13 for the washing-machine technician."
 }</code></pre>
   <h3>Custom GPT Actions</h3>
   <p>Import <code><span data-base></span>/openapi.json</code>, auth type <i>API key → Bearer</i> with <code>ak_demo_milano</code>.</p>
@@ -79,9 +80,10 @@
   <h2 id="rest">REST</h2>
   <pre><code>B=<span data-base></span>; K="Authorization: Bearer ak_demo_milano"
 curl -s -X POST $B/v1/tasks/compile -H "$K" -H 'content-type: application/json' \
-  -d '{"text": "sistemare il giardino sabato mattina, circa 80 mq con la siepe, zona Navigli"}'
+  -d '{"text": "Porta la mia auto a lavare sabato mattina e riportamela, Navigli, berlina, interno+esterno"}'
+curl -s "$B/v1/supply?text=autolavaggio%20sabato%20mattina%20Navigli%20berlina&amp;limit=3" -H "$K"
 curl -s -X POST $B/v1/jobs -H "$K" -H 'content-type: application/json' \
-  -d '{"text": "sistemare il giardino sabato mattina, circa 80 mq con la siepe, zona Navigli", "agent_name": "Claude"}'
+  -d '{"text": "Porta la mia auto a lavare sabato mattina e riportamela, Navigli, berlina, interno+esterno", "agent_name": "Claude"}'
 curl -s -X POST $B/v1/jobs/JOB_ID/negotiate -H "$K" -H 'content-type: application/json' -d '{}'
 curl -s -X POST $B/v1/jobs/JOB_ID/accept-quote -H "$K" -H 'content-type: application/json' -d '{"quote_id": "q_..."}'
 curl -s "$B/v1/jobs/JOB_ID/events?since_seq=0&amp;timeout_s=20" -H "$K"      # long-poll

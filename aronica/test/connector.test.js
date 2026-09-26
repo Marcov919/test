@@ -38,24 +38,24 @@ test('MCP initialize / tools/list / notifications', async () => {
   assert.equal((await rpc({ jsonrpc: '2.0', id: 3, method: 'nope' })).json.error.code, -32601);
 });
 
-test('MCP: personal assistant plans the week → gardener, human confirm link', async () => {
+test('MCP: personal assistant books a car wash (compile → supply → negotiate), human confirm link', async () => {
   const unauth = await rpc({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_services', arguments: {} } }, { 'Content-Type': 'application/json' });
   assert.equal(unauth.json.error.code, -32001);
-  const compiled = await call('compile_task', { text: 'sistemare il giardino sabato mattina, circa 80 mq con la siepe, zona Navigli' });
+  const text = 'Porta la mia auto all\'autolavaggio sabato mattina e riportamela — Navigli, berlina, interno+esterno.';
+  const compiled = await call('compile_task', { text });
   assert.equal(compiled.isError, false);
-  assert.equal(compiled.structuredContent.service.code, 'giardinaggio');
-  const denied = await call('create_job', { text: 'trovami un dentista vicino al Duomo' });
+  assert.equal(compiled.structuredContent.service.code, 'lavaggio_auto');
+  const supply = await call('search_supply', { text, limit: 3 });
+  assert.equal(supply.structuredContent.partners[0].alias, 'Wash&Go Navigli Snc');
+  const denied = await call('create_job', { text: 'Trovami un insegnante di Capoeira ai Navigli' });
   assert.equal(denied.isError, true);
   assert.equal(denied.structuredContent.message, 'Siamo spiacenti ma al momento non abbiamo persone sufficienti a soddisfare la richiesta.');
-  const created = await call('create_job', { text: 'sistemare il giardino sabato mattina, circa 80 mq con la siepe, zona Navigli' });
+  assert.equal(denied.structuredContent.reason, 'fuori ambito v1');
+  const created = await call('create_job', { text });
   assert.equal(created.isError, false, JSON.stringify(created.structuredContent));
-  const jobId = created.structuredContent.job.id;
-  const neg = await call('auto_negotiate', { job_id: jobId });
-  assert.ok(neg.structuredContent.deal || neg.structuredContent.counters.length);
-  if (neg.structuredContent.deal) {
-    assert.equal(neg.structuredContent.auto_approved, false);
-    assert.match(neg.structuredContent.confirm_url, /\/buyer#\/job\/job_/);
-  }
+  const neg = await call('auto_negotiate', { job_id: created.structuredContent.job.id });
+  assert.equal(neg.structuredContent.auto_approved, false);
+  assert.match(neg.structuredContent.confirm_url, /\/buyer#\/job\/job_/);
 });
 
 test('MCP: company agent books 4 facchini at Fiera Rho, auto-approved and dispatched', async () => {
